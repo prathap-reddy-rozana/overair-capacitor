@@ -1,0 +1,12 @@
+node_modules/
+dist/
+*.tgz
+.DS_Store
+
+# Native build output
+android/build/
+android/.gradle/
+.build/
+.swiftpm/
+*.xcworkspace/xcuserdata/
+DerivedData/

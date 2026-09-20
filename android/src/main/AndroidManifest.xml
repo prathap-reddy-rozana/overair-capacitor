@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Bundles are fetched from presigned HTTPS URLs; no extra permission
+         beyond the internet access the app already needs. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+</manifest>
