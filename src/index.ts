@@ -1,7 +1,7 @@
 import { Capacitor, registerPlugin } from '@capacitor/core';
 
 import { DeliveryApi } from './api';
-import type { OverairPlugin } from './definitions';
+import type { DownloadProgress, DownloadStatus, OverairPlugin } from './definitions';
 import type { CheckResponse, DeviceEvent, Manifest, Platform, Reason } from './types';
 
 export * from './definitions';
@@ -75,6 +75,47 @@ class Updater {
   /** What the webview is serving, or null on the build in the binary. */
   async current() {
     return (await Overair.status()).current;
+  }
+
+  /**
+   * Bytes as they arrive, throttled natively to about ten a second.
+   *
+   * The handle survives nothing: a bundle swap reloads the web layer and
+   * every listener with it. That is why the authoritative state is
+   * `status().download` and this is only the live feed.
+   */
+  async onProgress(listener: (progress: DownloadProgress) => void) {
+    return Overair.addListener('downloadProgress', listener);
+  }
+
+  /** Every state change, including the terminal ones. `failure` is set only
+   *  on FAILED, and carries whether retrying is worth it. */
+  async onStateChange(listener: (status: DownloadStatus) => void) {
+    return Overair.addListener('downloadStateChanged', listener);
+  }
+
+  /** Stop the download in flight. Safe when there is not one. */
+  async cancel(): Promise<void> {
+    await Overair.cancel();
+  }
+
+  /**
+   * Try the last failed download again.
+   *
+   * Rejects when nothing failed or the failure was not retryable, so a retry
+   * button can be disabled straight off `status().download.failure`.
+   */
+  async retry(): Promise<SyncResult> {
+    const info = await Overair.retry();
+    await Overair.next({ id: info.id });
+    await this.emit('APPLIED', info.id);
+    return { reason: 'OFFERED', staged: true, deferred: null, reverted: false };
+  }
+
+  /** Where the current or most recent download got to. Unlike a listener,
+   *  this survives the web reload a bundle swap causes. */
+  async downloadStatus(): Promise<DownloadStatus> {
+    return (await Overair.status()).download;
   }
 
   /** Back to the build compiled into the binary, forgetting the rest. */

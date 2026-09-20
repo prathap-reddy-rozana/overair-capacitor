@@ -9,6 +9,7 @@ import com.getcapacitor.PluginMethod
 import com.getcapacitor.annotation.CapacitorPlugin
 import java.io.File
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Over-the-air updates for Capacitor.
@@ -25,6 +26,23 @@ class OverairPlugin : Plugin() {
     private lateinit var store: Store
     private lateinit var bundles: Bundles
     private val worker = Executors.newSingleThreadExecutor()
+
+    /** The live download. Held natively so a web reload - which happens on
+     *  every bundle swap - does not lose track of one already in flight. */
+    private val cancelled = AtomicBoolean(false)
+    private var downloading: DownloadOptions? = null
+    private var lastFailed: DownloadOptions? = null
+    private var state = "IDLE"
+    private var bytes = 0L
+    private var total = 0L
+    private var failure: JSObject? = null
+
+    private data class DownloadOptions(
+        val id: String,
+        val version: String,
+        val url: String,
+        val checksum: String,
+    )
 
     override fun load() {
         val context: Context = context
@@ -86,6 +104,7 @@ class OverairPlugin : Plugin() {
             .put("quarantined", JSArray(store.quarantined()))
             .put("rolledBack", store.rolledBackId != null)
             .put("rolledBackId", store.rolledBackId ?: JSObject.NULL)
+            .put("download", downloadStatus())
         // Reported once. A rollback is news exactly one time; after that it
         // is just the state the device is in.
         store.rolledBackId = null
@@ -115,20 +134,122 @@ class OverairPlugin : Plugin() {
         val url = call.getString("url") ?: return call.reject("url is required")
         val checksum = call.getString("checksum") ?: return call.reject("checksum is required")
         val version = call.getString("version") ?: ""
+        start(DownloadOptions(id, version, url, checksum), call)
+    }
+
+    /**
+     * Stop whatever is in flight.
+     *
+     * Resolves either way, so a cancel button never has to ask first. The
+     * partial file is deleted by the installer: a half-written archive is
+     * not a head start, it is rubbish that would fail its digest anyway.
+     */
+    @PluginMethod
+    fun cancel(call: PluginCall) {
+        cancelled.set(true)
+        call.resolve()
+    }
+
+    /**
+     * Try the last failed download again.
+     *
+     * Refused when the failure was not retryable - a digest mismatch means
+     * the same URL produces the same wrong bytes, and retrying forever is
+     * how a device burns a data plan on nothing.
+     */
+    @PluginMethod
+    fun retry(call: PluginCall) {
+        val previous = lastFailed ?: return call.reject("nothing to retry")
+        if (failure?.optBoolean("retryable") == false) {
+            return call.reject("the last failure is not retryable: " +
+                (failure?.optString("message") ?: ""))
+        }
+        start(previous, call)
+    }
+
+    private fun start(options: DownloadOptions, call: PluginCall) {
+        if (downloading != null) return call.reject("a download is already running")
+        downloading = options
+        cancelled.set(false)
+        failure = null
+        bytes = 0
+        total = 0
+        emitState("DOWNLOADING", options.id)
 
         // Off the main thread: this streams tens of megabytes and must never
         // be the reason the UI stops responding.
         worker.execute {
             try {
-                val (dir, size) = bundles.install(id, url, checksum)
-                val record = BundleRecord(id, version, dir.absolutePath, checksum, size, nativeBuild())
+                val (dir, size) = bundles.install(
+                    options.id, options.url, options.checksum,
+                    cancelled = { cancelled.get() },
+                    progress = { phase, read, length ->
+                        bytes = read
+                        total = length
+                        if (phase != state) emitState(phase, options.id) else emitProgress(options.id)
+                    },
+                )
+                val record = BundleRecord(
+                    options.id, options.version, dir.absolutePath,
+                    options.checksum, size, nativeBuild(),
+                )
+                downloading = null
+                lastFailed = null
+                emitState("READY", options.id)
                 call.resolve(describe(record))
             } catch (error: Exception) {
                 // Exception, not Throwable: an OutOfMemoryError is not a
                 // failed download and must not be reported as one.
+                downloading = null
+                lastFailed = options
+                val cancelledByUs = error is Bundles.Cancelled
+                failure = JSObject()
+                    .put("id", options.id)
+                    .put("code", codeFor(error))
+                    .put("message", error.message ?: "download failed")
+                    // A digest mismatch is deterministic: the same URL will
+                    // produce the same wrong bytes.
+                    .put("retryable", !cancelledByUs && error !is Bundles.VerifyError)
+                emitState(if (cancelledByUs) "CANCELLED" else "FAILED", options.id)
                 call.reject(error.message ?: "download failed", error)
             }
         }
+    }
+
+    private fun codeFor(error: Exception): String = when {
+        error is Bundles.Cancelled -> "cancelled"
+        error is Bundles.VerifyError && error.message?.contains("digest") == true -> "digest"
+        error is Bundles.VerifyError -> "unpack"
+        error.message?.contains("HTTP") == true -> "http"
+        error is java.io.IOException -> "network"
+        else -> "unknown"
+    }
+
+    private fun downloadStatus(): JSObject = JSObject()
+        .put("id", downloading?.id ?: lastFailed?.id ?: "")
+        .put("state", state)
+        .put("bytes", bytes)
+        .put("total", total)
+        .put("fraction", fraction())
+        .put("failure", failure ?: JSObject.NULL)
+
+    /** -1, not 0, when the length is unknown: a caller has to be able to tell
+     *  "no progress yet" from "cannot know". */
+    private fun fraction(): Double =
+        if (total > 0) (bytes.toDouble() / total).coerceIn(0.0, 1.0) else -1.0
+
+    private fun emitState(next: String, id: String) {
+        state = next
+        notifyListeners("downloadStateChanged", downloadStatus())
+        if (next == "DOWNLOADING") emitProgress(id)
+    }
+
+    private fun emitProgress(id: String) {
+        notifyListeners(
+            "downloadProgress",
+            JSObject().put("id", id).put("state", state)
+                .put("bytes", bytes).put("total", total).put("fraction", fraction()),
+        )
     }
 
     /** Make a downloaded bundle the one the next launch serves. */

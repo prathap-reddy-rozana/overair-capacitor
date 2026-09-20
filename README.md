@@ -79,8 +79,56 @@ A bundle larger than the server's `auto_max_bytes` is **not** downloaded
 automatically, because the device is the only thing that knows it is on
 somebody's data plan. Prompt, then call `sync()` again when the user agrees.
 
-For direct control, the plugin itself is exported as `Overair`: `status()`,
-`download()`, `next()`, `quarantine()`, `reset()`, `prune()`.
+## Progress, cancel, retry
+
+A 40 MB download on a phone needs a progress bar and a way out of it.
+
+```ts
+const handle = await OverairUpdater.onProgress(({ fraction, bytes, total }) => {
+  // fraction is -1 when the server sends no content length
+  bar.value = fraction;
+});
+
+await OverairUpdater.cancel();   // safe whether or not one is running
+handle.remove();
+```
+
+Every state change is its own event - `DOWNLOADING`, `VERIFYING`, `UNPACKING`,
+`READY`, `FAILED`, `CANCELLED`:
+
+```ts
+await OverairUpdater.onStateChange(({ state, failure }) => {
+  if (state === 'FAILED' && failure?.retryable) showRetry();
+});
+
+await OverairUpdater.retry();    // rejects when the failure was not retryable
+```
+
+**`retry()` refuses a digest mismatch**, because the same URL will produce the
+same wrong bytes and retrying it forever is how a device burns a data plan on
+nothing. `failure.retryable` says so before you offer the button.
+
+Listeners do not survive a bundle swap - it reloads the web layer and every
+listener with it. The authoritative state is native and outlives that:
+
+```ts
+const { state, fraction, failure } = await OverairUpdater.downloadStatus();
+```
+
+## Every capability
+
+| | |
+|---|---|
+| Check for an update | `sync()` |
+| Download | `sync()`, or `Overair.download()` directly |
+| Download status | `downloadStatus()`, or `status().download` |
+| Download progress | `onProgress()` - throttled natively to ~10/s |
+| Failure detail | `failure.code` (`network` `http` `digest` `unpack` `cancelled`) and `failure.retryable` |
+| Cancel | `cancel()` |
+| Retry | `retry()`, refused when not retryable |
+| Revert | `reset()`, plus automatic rollback on a failed boot |
+| Refuse a bundle forever | `Overair.quarantine()` |
+| Free disk | `Overair.prune()` |
 
 ## What happens on a launch
 

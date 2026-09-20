@@ -17,6 +17,8 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "status", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "identity", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "download", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "cancel", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "retry", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "next", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "notifyReady", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "quarantine", returnType: CAPPluginReturnPromise),
@@ -26,6 +28,21 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
 
     private let store = Store()
     private lazy var bundles = Bundles(root: Self.bundleRoot())
+
+    /// The live download. Held natively so a web reload - which happens on
+    /// every bundle swap - does not lose track of one already in flight.
+    private struct Pending {
+        let id: String
+        let version: String
+        let url: URL
+        let checksum: String
+    }
+    private var downloading: Pending?
+    private var lastFailed: Pending?
+    private var state = "IDLE"
+    private var bytes: Int64 = 0
+    private var total: Int64 = 0
+    private var failure: [String: Any]?
 
     private static func bundleRoot() -> URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory,
@@ -82,6 +99,7 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
             "quarantined": store.quarantined,
             "rolledBack": store.rolledBackId != nil,
             "rolledBackId": store.rolledBackId as Any,
+            "download": downloadStatus(),
         ]
         result["current"] = store.active.map(describe) as Any
         result["next"] = store.next.map(describe) as Any
@@ -114,19 +132,128 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
         guard let checksum = call.getString("checksum") else {
             return call.reject("checksum is required")
         }
-        let version = call.getString("version") ?? ""
+        start(Pending(id: id, version: call.getString("version") ?? "",
+                      url: url, checksum: checksum), call)
+    }
+
+    /// Stop whatever is in flight.
+    ///
+    /// Resolves either way, so a cancel button never has to ask first. The
+    /// partial file is discarded: a half-written archive is not a head start,
+    /// it is rubbish that would fail its digest anyway.
+    @objc func cancel(_ call: CAPPluginCall) {
+        bundles.cancel()
+        call.resolve()
+    }
+
+    /// Try the last failed download again.
+    ///
+    /// Refused when the failure was not retryable - a digest mismatch means
+    /// the same URL produces the same wrong bytes, and retrying forever is
+    /// how a device burns a data plan on nothing.
+    @objc func retry(_ call: CAPPluginCall) {
+        guard let previous = lastFailed else { return call.reject("nothing to retry") }
+        if let failure, failure["retryable"] as? Bool == false {
+            return call.reject("the last failure is not retryable: "
+                               + (failure["message"] as? String ?? ""))
+        }
+        start(previous, call)
+    }
+
+    private func start(_ pending: Pending, _ call: CAPPluginCall) {
+        guard downloading == nil else { return call.reject("a download is already running") }
+        downloading = pending
+        failure = nil
+        bytes = 0
+        total = 0
+        emit(state: "DOWNLOADING", id: pending.id)
 
         Task {
             do {
-                let (directory, size) = try await bundles.install(id: id, url: url, expected: checksum)
-                let record = BundleRecord(id: id, version: version, path: directory.path,
-                                          checksum: checksum, size: size,
-                                          nativeBuild: Self.nativeBuild())
+                let (directory, size) = try await bundles.install(
+                    id: pending.id, url: pending.url, expected: pending.checksum,
+                    progress: { [weak self] phase, read, length in
+                        guard let self else { return }
+                        self.bytes = read
+                        self.total = length
+                        if phase != self.state {
+                            self.emit(state: phase, id: pending.id)
+                        } else {
+                            self.emitProgress(pending.id)
+                        }
+                    }
+                )
+                let record = BundleRecord(id: pending.id, version: pending.version,
+                                          path: directory.path, checksum: pending.checksum,
+                                          size: size, nativeBuild: Self.nativeBuild())
+                downloading = nil
+                lastFailed = nil
+                emit(state: "READY", id: pending.id)
                 call.resolve(describe(record))
             } catch {
+                downloading = nil
+                lastFailed = pending
+                let wasCancelled = (error as? Bundles.Failure).map(Self.isCancelled) ?? false
+                failure = [
+                    "id": pending.id,
+                    "code": Self.code(for: error),
+                    "message": error.localizedDescription,
+                    // A digest mismatch is deterministic: the same URL will
+                    // produce the same wrong bytes.
+                    "retryable": !wasCancelled && Self.code(for: error) != "digest",
+                ]
+                emit(state: wasCancelled ? "CANCELLED" : "FAILED", id: pending.id)
                 call.reject(error.localizedDescription, nil, error)
             }
         }
+    }
+
+    private static func isCancelled(_ failure: Bundles.Failure) -> Bool {
+        if case .cancelled = failure { return true }
+        return false
+    }
+
+    private static func code(for error: Error) -> String {
+        if let failure = error as? Bundles.Failure {
+            switch failure {
+            case .cancelled: return "cancelled"
+            case .digest: return "digest"
+            case .unsafeEntry: return "unpack"
+            case .http: return "http"
+            }
+        }
+        if (error as NSError).domain == NSURLErrorDomain { return "network" }
+        return "unknown"
+    }
+
+    private func downloadStatus() -> [String: Any] {
+        [
+            "id": downloading?.id ?? lastFailed?.id ?? "",
+            "state": state,
+            "bytes": bytes,
+            "total": total,
+            "fraction": fraction(),
+            "failure": failure as Any,
+        ]
+    }
+
+    /// -1, not 0, when the length is unknown: a caller has to be able to tell
+    /// "no progress yet" from "cannot know".
+    private func fraction() -> Double {
+        total > 0 ? min(max(Double(bytes) / Double(total), 0), 1) : -1
+    }
+
+    private func emit(state next: String, id: String) {
+        state = next
+        notifyListeners("downloadStateChanged", data: downloadStatus())
+        if next == "DOWNLOADING" { emitProgress(id) }
+    }
+
+    private func emitProgress(_ id: String) {
+        notifyListeners("downloadProgress", data: [
+            "id": id, "state": state, "bytes": bytes,
+            "total": total, "fraction": fraction(),
+        ])
     }
 
     /// Make a downloaded bundle the one the next launch serves.

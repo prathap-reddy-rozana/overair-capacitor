@@ -1,3 +1,5 @@
+import type { PluginListenerHandle } from '@capacitor/core';
+
 /**
  * The native contract.
  *
@@ -20,6 +22,61 @@ export interface BundleInfo {
   checksum: string;
 }
 
+/**
+ * Where a download is.
+ *
+ * Separate states for verifying and unpacking because they are separately
+ * slow and separately able to fail: a digest mismatch and a bad archive are
+ * different problems and only one of them is worth retrying.
+ */
+export type DownloadState =
+  | 'IDLE'
+  | 'DOWNLOADING'
+  | 'VERIFYING'
+  | 'UNPACKING'
+  | 'READY'
+  | 'FAILED'
+  | 'CANCELLED';
+
+export type FailureCode =
+  /** The connection went away. Worth retrying. */
+  | 'network'
+  /** The server answered, but not with the bundle. Worth retrying. */
+  | 'http'
+  /** The bytes are not what the server said they were. NOT worth retrying:
+   *  the same URL will produce the same wrong bytes. */
+  | 'digest'
+  /** The archive would not expand, or tried to write outside its directory. */
+  | 'unpack'
+  /** Somebody called cancel(). */
+  | 'cancelled'
+  | 'unknown';
+
+export interface DownloadFailure {
+  id: string;
+  code: FailureCode;
+  message: string;
+  /** Whether `retry()` has any chance. A digest mismatch does not. */
+  retryable: boolean;
+}
+
+export interface DownloadProgress {
+  id: string;
+  state: DownloadState;
+  /** Bytes fetched so far. */
+  bytes: number;
+  /** Total bytes, or 0 when the server sends no content length. */
+  total: number;
+  /** 0..1, or -1 when the total is unknown - so a caller can tell the
+   *  difference between "no progress yet" and "cannot know". */
+  fraction: number;
+}
+
+/** The live download, as `status()` reports it. */
+export interface DownloadStatus extends DownloadProgress {
+  failure: DownloadFailure | null;
+}
+
 export interface OverairStatus {
   /** What the webview is serving right now. Null on the embedded build. */
   current: BundleInfo | null;
@@ -32,6 +89,9 @@ export interface OverairStatus {
   rolledBack: boolean;
   /** The bundle that was rolled back, if any. */
   rolledBackId: string | null;
+  /** Where the current or most recent download got to. Survives a reload of
+   *  the web layer, because it lives natively. */
+  download: DownloadStatus;
 }
 
 /**
@@ -65,7 +125,8 @@ export interface DownloadOptions {
 }
 
 export interface OverairPlugin {
-  /** What is running, what is waiting, and what was refused. */
+  /** What is running, what is waiting, what was refused, and where any
+   *  download got to. */
   status(): Promise<OverairStatus>;
 
   /** Identity and configuration, from native config. */
@@ -75,8 +136,29 @@ export interface OverairPlugin {
    * Download, verify and unpack a bundle. Native throughout: streamed to
    * disk, hashed while streaming, unzipped without holding the archive in
    * the webview's heap.
+   *
+   * Rejects on failure; the reason is also in `status().download.failure`,
+   * which outlives a web reload.
    */
   download(options: DownloadOptions): Promise<BundleInfo>;
+
+  /**
+   * Stop the download in flight.
+   *
+   * Resolves whether or not one was running, so a cancel button never has to
+   * ask first. The partial file is deleted: a half-written archive is not a
+   * head start, it is rubbish that would fail its digest anyway.
+   */
+  cancel(): Promise<void>;
+
+  /**
+   * Try the last failed download again.
+   *
+   * Rejects when nothing failed, or when the failure was not retryable - a
+   * digest mismatch means the same URL produces the same wrong bytes, and
+   * retrying it forever is how a device burns a data plan on nothing.
+   */
+  retry(): Promise<BundleInfo>;
 
   /** Make a downloaded bundle the one the next launch runs. */
   next(options: { id: string }): Promise<void>;
@@ -98,4 +180,20 @@ export interface OverairPlugin {
 
   /** Delete everything except what is running and what is next. */
   prune(): Promise<void>;
+
+  /** Bytes as they arrive. Throttled natively to about ten a second, because
+   *  a progress bar cannot show more and every one crosses the bridge. */
+  addListener(
+    eventName: 'downloadProgress',
+    listener: (progress: DownloadProgress) => void,
+  ): Promise<PluginListenerHandle>;
+
+  /** Every state change, including the terminal ones. `failure` is set only
+   *  on FAILED. */
+  addListener(
+    eventName: 'downloadStateChanged',
+    listener: (status: DownloadStatus) => void,
+  ): Promise<PluginListenerHandle>;
+
+  removeAllListeners(): Promise<void>;
 }

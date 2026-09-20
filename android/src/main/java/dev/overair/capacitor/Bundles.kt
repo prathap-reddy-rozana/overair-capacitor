@@ -2,9 +2,9 @@ package dev.overair.capacitor
 
 import java.io.File
 import java.io.IOException
+import java.io.InterruptedIOException
 import java.net.HttpURLConnection
 import java.net.URL
-import java.security.DigestInputStream
 import java.security.MessageDigest
 import java.util.zip.ZipInputStream
 
@@ -19,6 +19,12 @@ import java.util.zip.ZipInputStream
 class Bundles(private val root: File) {
 
     class VerifyError(message: String) : IOException(message)
+    class Cancelled : IOException("cancelled")
+
+    /** Reported as bytes arrive, and again at each phase change. */
+    fun interface Progress {
+        fun report(state: String, bytes: Long, total: Long)
+    }
 
     fun dirFor(id: String): File = File(root, id)
 
@@ -28,22 +34,37 @@ class Bundles(private val root: File) {
      * The digest is checked before a single file is written, so a bundle
      * that does not match never touches a directory the webview might later
      * serve and a failed download cannot leave a half-applied tree behind.
+     *
+     * `cancelled` is polled rather than interrupting the thread: a half-torn
+     * stream leaves a partial file that looks like a resumable download and
+     * is not one.
      */
-    fun install(id: String, url: String, expected: String): Pair<File, Long> {
+    fun install(
+        id: String,
+        url: String,
+        expected: String,
+        cancelled: () -> Boolean = { false },
+        progress: Progress = Progress { _, _, _ -> },
+    ): Pair<File, Long> {
         root.mkdirs()
         val archive = File(root, "$id.zip.part")
         val target = dirFor(id)
 
         try {
-            val digest = download(url, archive)
+            val digest = download(url, archive, cancelled, progress)
+
+            progress.report("VERIFYING", archive.length(), archive.length())
             if (!digest.equals(expected, ignoreCase = true)) {
                 throw VerifyError("digest mismatch: expected $expected, got $digest")
             }
+            if (cancelled()) throw Cancelled()
+
+            progress.report("UNPACKING", archive.length(), archive.length())
             // A previous half-written attempt is rubbish, not a head start:
             // the tree must be exactly what the archive says.
             target.deleteRecursively()
             target.mkdirs()
-            val size = unzip(archive, target)
+            val size = unzip(archive, target, cancelled)
             return target to size
         } catch (error: Throwable) {
             target.deleteRecursively()
@@ -54,7 +75,12 @@ class Bundles(private val root: File) {
     }
 
     /** Streams to disk and hashes in the same pass. Returns the hex digest. */
-    private fun download(url: String, into: File): String {
+    private fun download(
+        url: String,
+        into: File,
+        cancelled: () -> Boolean,
+        progress: Progress,
+    ): String {
         val connection = (URL(url).openConnection() as HttpURLConnection).apply {
             connectTimeout = 30_000
             readTimeout = 60_000
@@ -64,22 +90,49 @@ class Bundles(private val root: File) {
             if (connection.responseCode !in 200..299) {
                 throw IOException("download failed: HTTP ${connection.responseCode}")
             }
+            // -1 when the server sends no length, which a presigned URL for a
+            // streamed object legitimately may not.
+            val total = connection.contentLengthLong.coerceAtLeast(0L)
             val md = MessageDigest.getInstance("SHA-256")
-            DigestInputStream(connection.inputStream, md).use { input ->
-                into.outputStream().use { output -> input.copyTo(output, DEFAULT_BUFFER_SIZE) }
+            var read = 0L
+            // Ten a second at most: a progress bar cannot show more, and each
+            // one crosses the bridge.
+            var lastReport = 0L
+
+            connection.inputStream.use { input ->
+                into.outputStream().use { output ->
+                    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                    while (true) {
+                        if (cancelled()) throw Cancelled()
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        output.write(buffer, 0, count)
+                        md.update(buffer, 0, count)
+                        read += count
+                        val now = System.currentTimeMillis()
+                        if (now - lastReport >= 100) {
+                            progress.report("DOWNLOADING", read, total)
+                            lastReport = now
+                        }
+                    }
+                }
             }
+            progress.report("DOWNLOADING", read, total)
             return md.digest().joinToString("") { "%02x".format(it) }
+        } catch (error: InterruptedIOException) {
+            throw if (cancelled()) Cancelled() else error
         } finally {
             connection.disconnect()
         }
     }
 
     /** Returns the unpacked size in bytes. */
-    private fun unzip(archive: File, target: File): Long {
+    private fun unzip(archive: File, target: File, cancelled: () -> Boolean): Long {
         var total = 0L
         ZipInputStream(archive.inputStream().buffered()).use { zip ->
             var entry = zip.nextEntry
             while (entry != null) {
+                if (cancelled()) throw Cancelled()
                 val destination = resolve(target, entry.name)
                 if (entry.isDirectory) {
                     destination.mkdirs()

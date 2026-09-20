@@ -1,7 +1,7 @@
 import { WebPlugin } from '@capacitor/core';
 
 import type {
-  BundleInfo, DownloadOptions, OverairIdentity, OverairPlugin, OverairStatus,
+  BundleInfo, DownloadOptions, DownloadStatus, OverairIdentity, OverairPlugin, OverairStatus,
 } from './definitions';
 
 /**
@@ -16,7 +16,15 @@ import type {
 export class OverairWeb extends WebPlugin implements OverairPlugin {
 
   async status(): Promise<OverairStatus> {
-    return { current: null, next: null, quarantined: [], rolledBack: false, rolledBackId: null };
+    return {
+      current: null, next: null, quarantined: [],
+      rolledBack: false, rolledBackId: null,
+      download: this.idle(),
+    };
+  }
+
+  private idle(): DownloadStatus {
+    return { id: '', state: 'IDLE', bytes: 0, total: 0, fraction: -1, failure: null };
   }
 
   async identity(): Promise<OverairIdentity> {
@@ -37,6 +45,14 @@ export class OverairWeb extends WebPlugin implements OverairPlugin {
 
   async next(_options: { id: string }): Promise<void> {
     throw this.unavailable('Bundles are only applied on a device.');
+  }
+
+  async cancel(): Promise<void> {
+    return;
+  }
+
+  async retry(): Promise<BundleInfo> {
+    throw this.unavailable('Bundles are only downloaded on a device.');
   }
 
   /** The one method that succeeds on web: an app that calls it on every
