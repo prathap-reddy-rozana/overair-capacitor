@@ -30,7 +30,7 @@ ordinary HTTP and stays in TypeScript.
 ## Install
 
 ```bash
-npm install github:rozana-dev/overair-capacitor
+npm install github:prathap-reddy-rozana/overair-capacitor
 npx cap sync
 ```
 
