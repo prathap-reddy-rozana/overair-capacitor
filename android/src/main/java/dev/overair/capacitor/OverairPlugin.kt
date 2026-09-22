@@ -78,9 +78,10 @@ class OverairPlugin : Plugin() {
         when (decision.run) {
             Run.EMBEDDED -> {
                 store.pending = false
-                // Clears Capacitor's own persisted path as well, so the next
-                // cold start does not restore the bundle we just rejected.
-                if (bridge.serverBasePath.isNotEmpty()) bridge.setServerBasePath("")
+                // Nothing to do. We never persist a base path, so a cold start
+                // is ALREADY serving the assets in the binary. Setting it to ""
+                // does not mean "use the built-in assets" - it points the local
+                // server at nothing and the webview renders a blank page.
             }
             Run.BUNDLE -> {
                 val record = decision.record!!
@@ -295,7 +296,9 @@ class OverairPlugin : Plugin() {
     fun reset(call: PluginCall) {
         store.forgetBundles()
         bundles.removeAll()
-        bridge.setServerBasePath("")
+        // Mid-session, the webview IS serving a bundle, so going back needs an
+        // explicit pointer at the assets in the binary - "" would serve nothing.
+        bridge.setServerAssetPath("public")
         call.resolve()
     }
 

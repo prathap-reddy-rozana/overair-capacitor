@@ -80,7 +80,10 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
         switch decision.run {
         case .embedded:
             store.pending = false
-            bridge?.setServerBasePath("")
+            // Nothing to do. We never persist a base path, so a cold start is
+            // ALREADY serving the assets in the binary. Setting it to "" here
+            // does not mean "use the built-in assets" - it points the local
+            // server at nothing and the webview renders a blank page.
         case .bundle:
             guard let record = decision.record,
                   FileManager.default.fileExists(atPath: record.path) else {
@@ -297,7 +300,11 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
     @objc func reset(_ call: CAPPluginCall) {
         store.forgetBundles()
         bundles.removeAll()
-        bridge?.setServerBasePath("")
+        // Mid-session, the webview IS serving a bundle, so going back needs an
+        // explicit path to the assets in the binary - "" would serve nothing.
+        if let embedded = Bundle.main.url(forResource: "public", withExtension: nil) {
+            bridge?.setServerBasePath(embedded.path)
+        }
         call.resolve()
     }
 
