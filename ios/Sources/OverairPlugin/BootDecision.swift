@@ -48,16 +48,20 @@ public struct BootFacts {
     public let active: BundleRecord?
     /// Unpacked and waiting for its one chance to start.
     public let next: BundleRecord?
+    /// The bundle that was active before the current one. Kept so a bundle
+    /// that breaks does not cost the user every update they ever took.
+    public let previous: BundleRecord?
     /// True when the previous launch served a bundle that never called
     /// `notifyReady()`.
     public let pending: Bool
 
     public init(nativeBuild: String, storedBuild: String?, active: BundleRecord?,
-                next: BundleRecord?, pending: Bool) {
+                next: BundleRecord?, previous: BundleRecord? = nil, pending: Bool) {
         self.nativeBuild = nativeBuild
         self.storedBuild = storedBuild
         self.active = active
         self.next = next
+        self.previous = previous
         self.pending = pending
     }
 }
@@ -95,7 +99,10 @@ public enum Boot {
         if facts.pending {
             markBad = next?.id ?? active?.id
             next = nil
-            if let bad = markBad, active?.id == bad { active = nil }
+            // The bundle that failed WAS the active one, so step back to its
+            // predecessor rather than throwing away every update this device
+            // ever took. Embedded is the floor, not the first resort.
+            if let bad = markBad, active?.id == bad { active = facts.previous }
         }
 
         // A bundle that has never started goes first. One launch is what it

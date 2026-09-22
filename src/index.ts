@@ -118,6 +118,21 @@ class Updater {
     return (await Overair.status()).download;
   }
 
+  /**
+   * Step back one bundle after a failure the app detected itself.
+   *
+   * The boot watchdog only catches a bundle that never starts. This is for
+   * the one that starts and is then obviously broken - and it costs the user
+   * the bad update rather than every update they have ever taken.
+   */
+  async rollback(): Promise<{ rolledBackTo: string }> {
+    const status = await Overair.status();
+    const result = await Overair.rollback();
+    if (status.current) await this.emit('FAILED', status.current.id, 'app_reported');
+    await this.emit('REVERTED', status.previous?.id);
+    return result;
+  }
+
   /** Back to the build compiled into the binary, forgetting the rest. */
   async reset(): Promise<void> {
     await Overair.reset();

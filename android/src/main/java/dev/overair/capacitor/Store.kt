@@ -66,6 +66,12 @@ class Store(context: Context) {
         get() = record(NEXT)
         set(value) = put(NEXT, value)
 
+    /** What was active before the current one. A bundle that breaks costs the
+     *  user one update, not every update they ever took. */
+    var previous: BundleRecord?
+        get() = record(PREVIOUS)
+        set(value) = put(PREVIOUS, value)
+
     /** Set when a bundle is handed to the webview, cleared by notifyReady().
      *  A launch that finds it still set knows the last one never came back. */
     var pending: Boolean
@@ -97,7 +103,8 @@ class Store(context: Context) {
 
     /** Forget every bundle. Used when a store update lands. */
     fun forgetBundles() {
-        prefs.edit().remove(ACTIVE).remove(NEXT).putBoolean(PENDING, false).apply()
+        prefs.edit().remove(ACTIVE).remove(NEXT).remove(PREVIOUS)
+            .putBoolean(PENDING, false).apply()
     }
 
     private fun record(key: String): BundleRecord? {
@@ -118,6 +125,7 @@ class Store(context: Context) {
         const val NATIVE_BUILD = "native_build"
         const val ACTIVE = "active"
         const val NEXT = "next"
+        const val PREVIOUS = "previous"
         const val PENDING = "pending"
         const val BAD = "quarantined"
         const val ROLLED_BACK = "rolled_back"

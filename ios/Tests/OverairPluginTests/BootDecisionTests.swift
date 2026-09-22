@@ -15,9 +15,10 @@ final class BootDecisionTests: XCTestCase {
     }
 
     private func facts(stored: String? = "42", active: BundleRecord? = nil,
-                       next: BundleRecord? = nil, pending: Bool = false) -> BootFacts {
+                       next: BundleRecord? = nil, previous: BundleRecord? = nil,
+                       pending: Bool = false) -> BootFacts {
         BootFacts(nativeBuild: "42", storedBuild: stored,
-                  active: active, next: next, pending: pending)
+                  active: active, next: next, previous: previous, pending: pending)
     }
 
     /// Row 1 - a fresh install has nothing to run but the binary.
@@ -76,6 +77,26 @@ final class BootDecisionTests: XCTestCase {
         XCTAssertEqual(decision.run, .bundle)
         XCTAssertEqual(decision.record?.id, "a")
         XCTAssertFalse(decision.isFirstBoot)
+    }
+
+    /// The active bundle failed and there IS a predecessor. Stepping back one
+    /// costs the user the broken update, not every update they ever took.
+    func testFailedActiveFallsBackToPredecessor() {
+        let decision = Boot.decide(
+            facts(active: record("a"), previous: record("older"), pending: true))
+        XCTAssertEqual(decision.markBad, "a")
+        XCTAssertEqual(decision.run, .bundle)
+        XCTAssertEqual(decision.record?.id, "older")
+        XCTAssertFalse(decision.isFirstBoot)
+    }
+
+    /// A predecessor is not a substitute for the staged bundle: when NEXT is
+    /// what failed, the confirmed active one still wins over anything older.
+    func testFailedStagedPrefersActiveOverPredecessor() {
+        let decision = Boot.decide(
+            facts(active: record("a"), next: record("b"), previous: record("older"), pending: true))
+        XCTAssertEqual(decision.markBad, "b")
+        XCTAssertEqual(decision.record?.id, "a")
     }
 
     /// Row 5, with nothing to fall back to: all the way to the binary.

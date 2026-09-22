@@ -24,8 +24,9 @@ class BootDecisionTest {
         stored: String? = "42",
         active: BundleRecord? = null,
         next: BundleRecord? = null,
+        previous: BundleRecord? = null,
         pending: Boolean = false,
-    ) = BootFacts("42", stored, active, next, pending)
+    ) = BootFacts("42", stored, active, next, previous, pending)
 
     /** Row 1 - a fresh install has nothing to run but the binary. */
     @Test
@@ -88,6 +89,30 @@ class BootDecisionTest {
         assertEquals(Run.BUNDLE, decision.run)
         assertEquals("a", decision.record?.id)
         assertFalse(decision.isFirstBoot)
+    }
+
+    /** The active bundle failed and there IS a predecessor. Stepping back one
+     *  costs the user the broken update, not every update they ever took. */
+    @Test
+    fun `failed active falls back to predecessor`() {
+        val decision = Boot.decide(
+            facts(active = record("a"), previous = record("older"), pending = true),
+        )
+        assertEquals("a", decision.markBad)
+        assertEquals(Run.BUNDLE, decision.run)
+        assertEquals("older", decision.record?.id)
+        assertFalse(decision.isFirstBoot)
+    }
+
+    /** A predecessor is not a substitute for the staged bundle: when NEXT is
+     *  what failed, the confirmed active one still wins over anything older. */
+    @Test
+    fun `failed staged prefers active over predecessor`() {
+        val decision = Boot.decide(
+            facts(active = record("a"), next = record("b"), previous = record("older"), pending = true),
+        )
+        assertEquals("b", decision.markBad)
+        assertEquals("a", decision.record?.id)
     }
 
     /** Row 5, with nothing to fall back to: all the way to the binary. */

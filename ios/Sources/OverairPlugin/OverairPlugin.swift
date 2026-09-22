@@ -22,6 +22,7 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "next", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "notifyReady", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "quarantine", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "rollback", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "reset", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "prune", returnType: CAPPluginReturnPromise),
     ]
@@ -57,6 +58,7 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
                 storedBuild: store.storedBuild,
                 active: store.active,
                 next: store.next,
+                previous: store.previous,
                 pending: store.pending
             )
         )
@@ -106,6 +108,7 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
         ]
         result["current"] = store.active.map(describe) as Any
         result["next"] = store.next.map(describe) as Any
+        result["previous"] = store.previous.map(describe) as Any
         // Reported once. A rollback is news exactly one time; after that it
         // is just the state the device is in.
         store.rolledBackId = nil
@@ -281,9 +284,12 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
         // The watchdog's one job. Until this lands, `pending` is true and the
         // next launch rolls the bundle back before the webview loads.
         if let staged = store.next {
+            // The one being replaced becomes the fallback, and both are kept
+            // on disk - a predecessor that has been deleted is not a fallback.
+            store.previous = store.active
             store.active = staged
             store.next = nil
-            bundles.prune(keep: [staged.id])
+            bundles.prune(keep: Set([staged.id, store.previous?.id].compactMap { $0 }))
         }
         store.pending = false
         call.resolve()
@@ -295,6 +301,30 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
         if store.next?.id == id { store.next = nil }
         if store.active?.id == id { store.active = nil }
         call.resolve()
+    }
+
+    /// Step back one bundle, rather than all the way to the binary.
+    ///
+    /// For a failure the app itself detects - a screen that will not load, an
+    /// error it cannot recover from. The current bundle is refused forever and
+    /// its predecessor takes over; with no predecessor that is the embedded
+    /// build.
+    @objc func rollback(_ call: CAPPluginCall) {
+        guard let current = store.active else { return call.reject("nothing to roll back") }
+        store.quarantine(current.id)
+        store.active = store.previous
+        store.previous = nil
+        store.next = nil
+        store.pending = false
+        if let target = store.active {
+            bridge?.setServerBasePath(target.path)
+            call.resolve(["rolledBackTo": target.version])
+        } else {
+            if let embedded = Bundle.main.url(forResource: "public", withExtension: nil) {
+                bridge?.setServerBasePath(embedded.path)
+            }
+            call.resolve(["rolledBackTo": "embedded"])
+        }
     }
 
     @objc func reset(_ call: CAPPluginCall) {
@@ -312,6 +342,7 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
         var keep = Set<String>()
         if let active = store.active { keep.insert(active.id) }
         if let next = store.next { keep.insert(next.id) }
+        if let previous = store.previous { keep.insert(previous.id) }
         bundles.prune(keep: keep)
         call.resolve()
     }

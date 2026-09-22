@@ -75,6 +75,16 @@ declare class Updater {
     /** Where the current or most recent download got to. Unlike a listener,
      *  this survives the web reload a bundle swap causes. */
     downloadStatus(): Promise<DownloadStatus>;
+    /**
+     * Step back one bundle after a failure the app detected itself.
+     *
+     * The boot watchdog only catches a bundle that never starts. This is for
+     * the one that starts and is then obviously broken - and it costs the user
+     * the bad update rather than every update they have ever taken.
+     */
+    rollback(): Promise<{
+        rolledBackTo: string;
+    }>;
     /** Back to the build compiled into the binary, forgetting the rest. */
     reset(): Promise<void>;
     private run;

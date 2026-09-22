@@ -17,7 +17,7 @@ export class OverairWeb extends WebPlugin implements OverairPlugin {
 
   async status(): Promise<OverairStatus> {
     return {
-      current: null, next: null, quarantined: [],
+      current: null, next: null, previous: null, quarantined: [],
       rolledBack: false, rolledBackId: null,
       download: this.idle(),
     };
@@ -63,6 +63,10 @@ export class OverairWeb extends WebPlugin implements OverairPlugin {
 
   async quarantine(_options: { id: string }): Promise<void> {
     return;
+  }
+
+  async rollback(): Promise<{ rolledBackTo: string }> {
+    return { rolledBackTo: 'embedded' };
   }
 
   async reset(): Promise<void> {

@@ -126,6 +126,21 @@ var capacitorOverair = (function (exports, core) {
         async downloadStatus() {
             return (await Overair.status()).download;
         }
+        /**
+         * Step back one bundle after a failure the app detected itself.
+         *
+         * The boot watchdog only catches a bundle that never starts. This is for
+         * the one that starts and is then obviously broken - and it costs the user
+         * the bad update rather than every update they have ever taken.
+         */
+        async rollback() {
+            const status = await Overair.status();
+            const result = await Overair.rollback();
+            if (status.current)
+                await this.emit('FAILED', status.current.id, 'app_reported');
+            await this.emit('REVERTED', status.previous?.id);
+            return result;
+        }
         /** Back to the build compiled into the binary, forgetting the rest. */
         async reset() {
             await Overair.reset();
@@ -263,7 +278,7 @@ var capacitorOverair = (function (exports, core) {
     class OverairWeb extends core.WebPlugin {
         async status() {
             return {
-                current: null, next: null, quarantined: [],
+                current: null, next: null, previous: null, quarantined: [],
                 rolledBack: false, rolledBackId: null,
                 download: this.idle(),
             };
@@ -301,6 +316,9 @@ var capacitorOverair = (function (exports, core) {
         }
         async quarantine(_options) {
             return;
+        }
+        async rollback() {
+            return { rolledBackTo: 'embedded' };
         }
         async reset() {
             return;

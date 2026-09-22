@@ -18,6 +18,7 @@ public final class Store {
         static let nativeBuild = "overair.native_build"
         static let active = "overair.active"
         static let next = "overair.next"
+        static let previous = "overair.previous"
         static let pending = "overair.pending"
         static let bad = "overair.quarantined"
         static let rolledBack = "overair.rolled_back"
@@ -45,6 +46,13 @@ public final class Store {
     public var next: BundleRecord? {
         get { record(Key.next) }
         set { put(newValue, at: Key.next) }
+    }
+
+    /// What was active before the current one. A bundle that breaks costs the
+    /// user one update, not every update they ever took.
+    public var previous: BundleRecord? {
+        get { record(Key.previous) }
+        set { put(newValue, at: Key.previous) }
     }
 
     /// Set when a bundle is handed to the webview, cleared by `notifyReady()`.
@@ -78,6 +86,7 @@ public final class Store {
     public func forgetBundles() {
         defaults.removeObject(forKey: Key.active)
         defaults.removeObject(forKey: Key.next)
+        defaults.removeObject(forKey: Key.previous)
         defaults.set(false, forKey: Key.pending)
     }
 

@@ -20,6 +20,9 @@ data class BootFacts(
     val active: BundleRecord?,
     /** Unpacked and waiting for its one chance to start. */
     val next: BundleRecord?,
+    /** The bundle that was active before the current one. Kept so a bundle
+     *  that breaks does not cost the user every update they ever took. */
+    val previous: BundleRecord?,
     /** True when the previous launch handed over a bundle that never
      *  called notifyReady(). */
     val pending: Boolean,
@@ -58,7 +61,10 @@ object Boot {
         if (facts.pending) {
             markBad = next?.id ?: active?.id
             next = null
-            if (markBad != null && active?.id == markBad) active = null
+            // The bundle that failed WAS the active one, so step back to its
+            // predecessor rather than throwing away every update this device
+            // ever took. Embedded is the floor, not the first resort.
+            if (markBad != null && active?.id == markBad) active = facts.previous
         }
 
         // A bundle that has never started goes first. One launch is what it

@@ -82,6 +82,9 @@ export interface OverairStatus {
   current: BundleInfo | null;
   /** Unpacked and verified, waiting for the next launch. */
   next: BundleInfo | null;
+  /** What ran before `current`. This is what `rollback()` falls back to, and
+   *  its absence is why a rollback sometimes lands on the embedded build. */
+  previous: BundleInfo | null;
   /** Ids this device tried and refused. Sent on every check so the server
    *  stops offering them rather than the device rediscovering the break. */
   quarantined: string[];
@@ -175,7 +178,21 @@ export interface OverairPlugin {
   /** Refuse a bundle forever. Reported as `quarantined` on every check. */
   quarantine(options: { id: string }): Promise<void>;
 
-  /** Drop to the build compiled into the binary and forget the rest. */
+  /**
+   * Step back one bundle.
+   *
+   * For a failure the app itself detects and the boot watchdog cannot - a
+   * screen that will not load, an error it cannot recover from. The current
+   * bundle is refused forever and its predecessor takes over; with no
+   * predecessor that is the embedded build.
+   *
+   * Prefer this to `reset()`: it costs the user the broken update, not every
+   * update they ever took.
+   */
+  rollback(): Promise<{ rolledBackTo: string }>;
+
+  /** Drop ALL the way to the build compiled into the binary and forget the
+   *  rest. The blunt instrument; `rollback()` is usually what you want. */
   reset(): Promise<void>;
 
   /** Delete everything except what is running and what is next. */

@@ -25,6 +25,9 @@ export declare class OverairWeb extends WebPlugin implements OverairPlugin {
     quarantine(_options: {
         id: string;
     }): Promise<void>;
+    rollback(): Promise<{
+        rolledBackTo: string;
+    }>;
     reset(): Promise<void>;
     prune(): Promise<void>;
 }

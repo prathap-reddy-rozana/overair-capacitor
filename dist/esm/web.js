@@ -11,7 +11,7 @@ import { WebPlugin } from '@capacitor/core';
 export class OverairWeb extends WebPlugin {
     async status() {
         return {
-            current: null, next: null, quarantined: [],
+            current: null, next: null, previous: null, quarantined: [],
             rolledBack: false, rolledBackId: null,
             download: this.idle(),
         };
@@ -49,6 +49,9 @@ export class OverairWeb extends WebPlugin {
     }
     async quarantine(_options) {
         return;
+    }
+    async rollback() {
+        return { rolledBackTo: 'embedded' };
     }
     async reset() {
         return;

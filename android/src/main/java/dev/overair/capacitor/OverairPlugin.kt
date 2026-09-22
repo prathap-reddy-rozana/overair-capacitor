@@ -55,6 +55,7 @@ class OverairPlugin : Plugin() {
                 storedBuild = store.storedBuild,
                 active = store.active,
                 next = store.next,
+                previous = store.previous,
                 pending = store.pending,
             ),
         )
@@ -102,6 +103,7 @@ class OverairPlugin : Plugin() {
         val result = JSObject()
             .put("current", store.active?.let(::describe) ?: JSObject.NULL)
             .put("next", store.next?.let(::describe) ?: JSObject.NULL)
+            .put("previous", store.previous?.let(::describe) ?: JSObject.NULL)
             .put("quarantined", JSArray(store.quarantined()))
             .put("rolledBack", store.rolledBackId != null)
             .put("rolledBackId", store.rolledBackId ?: JSObject.NULL)
@@ -275,9 +277,12 @@ class OverairPlugin : Plugin() {
         // The watchdog's one job. Until this lands, `pending` is true and the
         // next launch will roll the bundle back before the webview loads.
         store.next?.let { staged ->
+            // The one being replaced becomes the fallback, and both are kept
+            // on disk - a predecessor that has been deleted is not a fallback.
+            store.previous = store.active
             store.active = staged
             store.next = null
-            bundles.prune(setOf(staged.id))
+            bundles.prune(setOfNotNull(staged.id, store.previous?.id))
         }
         store.pending = false
         call.resolve()
@@ -292,6 +297,29 @@ class OverairPlugin : Plugin() {
         call.resolve()
     }
 
+    /**
+     * Step back one bundle, rather than all the way to the binary.
+     *
+     * For a failure the app itself detects - a screen that will not load,
+     * an error it cannot recover from. The current bundle is refused forever
+     * and its predecessor takes over on the next launch; with no predecessor
+     * that is the embedded build.
+     */
+    @PluginMethod
+    fun rollback(call: PluginCall) {
+        val current = store.active
+        if (current == null) return call.reject("nothing to roll back")
+        store.quarantine(current.id)
+        store.active = store.previous
+        store.previous = null
+        store.next = null
+        store.pending = false
+        val target = store.active
+        if (target != null) bridge.setServerBasePath(target.path)
+        else bridge.setServerAssetPath("public")
+        call.resolve(JSObject().put("rolledBackTo", target?.version ?: "embedded"))
+    }
+
     @PluginMethod
     fun reset(call: PluginCall) {
         store.forgetBundles()
@@ -304,7 +332,7 @@ class OverairPlugin : Plugin() {
 
     @PluginMethod
     fun prune(call: PluginCall) {
-        bundles.prune(setOfNotNull(store.active?.id, store.next?.id))
+        bundles.prune(setOfNotNull(store.active?.id, store.next?.id, store.previous?.id))
         call.resolve()
     }
 
