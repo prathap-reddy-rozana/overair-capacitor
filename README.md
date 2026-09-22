@@ -79,6 +79,52 @@ result.update     // the manifest: version, size, and `mandatory`
 result.reason     // why, including every refusal
 ```
 
+**A deferred update needs `accept()`.** `auto_max_bytes` is the server saying
+ASK, not refuse: anything over it is left alone so a 20 MB bundle does not
+land on somebody's data plan unannounced. Show the version and size, and call
+`accept()` when they agree. Without that call the deferred manifest is
+something to display and nothing more.
+
+```ts
+const { deferred } = await OverairUpdater.sync();
+if (deferred) showUpdateButton(deferred.version, deferred.size);
+
+await OverairUpdater.accept();   // stages it, exactly as sync would have
+```
+
+A mandatory release ignores the ceiling and stages itself, so `accept()` is
+only ever needed for an optional one.
+
+## Overriding what the binary was built with
+
+`sync()` takes `apiUrl`, `apiKey`, `channel` and `runtime`, each falling back
+to `capacitor.config`. The first three are ordinary remote settings. The fourth
+is not:
+
+**`runtime` has nothing behind it — it IS the guard.** It is the assertion that
+this binary can run bundles built for a given native surface, and the only
+thing between a device and a bundle calling native code it does not have.
+Nothing checks an override against the binary, because nothing can: a value
+that disagrees will be believed, and the device will be offered a bundle it
+cannot run. If that bundle fails to start the watchdog rolls it back, and the
+server goes on offering it — a loop that repeats every launch.
+
+Empty means "use the binary's own", which is the right value unless a store
+release really did change the native surface. Two ways to supply it:
+
+```ts
+// Keyed on the build, so a config cannot claim a binary is one it is not.
+const { nativeBuild } = await Overair.identity();
+await OverairUpdater.sync({ runtime: runtimeByBuild[nativeBuild] ?? '' });
+
+// Or plainly, if your config surface is trusted and change-controlled.
+await OverairUpdater.sync({ runtime: remoteConfig.runtime });
+```
+
+The first cannot be wrong about which binary it is talking to. The second is
+simpler and is fine where the people editing the config are the people
+shipping the builds — just know that it carries the risk above.
+
 ## Progress, cancel, retry
 
 ```ts
@@ -103,6 +149,12 @@ slow and separately able to fail.
 short-lived; replaying one re-uses a link that may have expired. It refuses a
 `digest` failure outright - the bytes on the server are wrong, and a fresh link
 fetches the same wrong bytes.
+
+Re-checking means the size ceiling is applied again, so a bundle the user
+accepted through `accept()` is remembered by id and not deferred a second
+time. Without that the retry button would re-ask instead of retrying. A
+different large bundle offered later still asks: agreeing to one update is
+not agreeing to the next.
 
 Listeners do not survive a bundle swap, which reloads the web layer. The
 authoritative state is native and outlives it:

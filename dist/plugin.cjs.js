@@ -50,6 +50,25 @@ const Overair = core.registerPlugin('Overair', {
     web: () => Promise.resolve().then(function () { return web; }).then((m) => new m.OverairWeb()),
 });
 /**
+ * Is this update too big to take without asking?
+ *
+ * The ceiling is the DEVICE's call because it is the only thing that knows it
+ * is on somebody's data plan. Two things override it: `mandatory`, because a
+ * build that is actively broken is worth the megabytes; and the user having
+ * already accepted this exact bundle, because re-asking after a failed
+ * download is how a retry button comes to do nothing at all.
+ *
+ * Keyed on the bundle id rather than a flag: agreeing to one large update is
+ * not agreeing to the next one.
+ */
+function shouldDefer(update, acceptedId) {
+    if (update.mandatory)
+        return false;
+    if (update.bundle_id === acceptedId)
+        return false;
+    return update.auto_max_bytes > 0 && update.size > update.auto_max_bytes;
+}
+/**
  * The protocol half of the SDK.
  *
  * Native decides what runs and owns the bytes; this decides what to ask for.
@@ -60,6 +79,11 @@ class Updater {
     api = null;
     options = {};
     inFlight = null;
+    /** The last manifest held back by the size ceiling, for `accept`. */
+    deferred = null;
+    /** The bundle the user has already said yes to. Per bundle id, not a flag:
+     *  agreeing to one large update is not agreeing to the next one. */
+    acceptedId = null;
     /**
      * Ask the server, and act on the answer.
      *
@@ -118,6 +142,27 @@ class Updater {
     /** Stop the download in flight. Safe when there is not one. */
     async cancel() {
         await Overair.cancel();
+    }
+    /**
+     * Take an update that `sync` deferred.
+     *
+     * The ceiling in `auto_max_bytes` is a decision to ASK, not a refusal, so
+     * something has to be able to say yes. Without this the deferred manifest
+     * is a fact the app can display and nothing more.
+     *
+     * The install id is re-read rather than remembered: a deferred update can
+     * sit on screen for as long as the user leaves it there.
+     */
+    async accept(update) {
+        const manifest = update ?? this.deferred;
+        if (!manifest)
+            throw new Error('nothing deferred to accept');
+        // Remembered BEFORE staging, so a download that fails can still be
+        // retried: `retry` re-checks, and the ceiling would otherwise defer the
+        // very bundle this call was agreeing to.
+        this.acceptedId = manifest.bundle_id;
+        const identity = await Overair.identity();
+        return this.stage(manifest, 'OFFERED', identity.installId);
     }
     /**
      * Try again after a failed download.
@@ -189,8 +234,8 @@ class Updater {
             response = await this.api.check({
                 install_id: identity.installId,
                 platform: core.Capacitor.getPlatform(),
-                runtime: identity.runtime,
-                channel: identity.channel,
+                runtime: this.options.runtime || identity.runtime,
+                channel: this.options.channel || identity.channel,
                 app_version: identity.appVersion,
                 build_number: identity.nativeBuild,
                 os_version: '',
@@ -216,13 +261,12 @@ class Updater {
             };
         }
         const update = response.update;
+        this.deferred = null;
         if (!update)
             return { ...idle, reason: response.reason };
-        // The ceiling is the device's call because it is the only thing that
-        // knows it is on somebody's data plan. Mandatory overrides it: a build
-        // that is actively broken is worth the megabytes.
-        if (update.auto_max_bytes > 0 && update.size > update.auto_max_bytes && !update.mandatory) {
+        if (shouldDefer(update, this.acceptedId)) {
             this.log(`deferred ${update.version}: ${update.size} over ${update.auto_max_bytes}`);
+            this.deferred = update;
             return {
                 reason: response.reason, staged: false, deferred: update, reverted: false, update,
             };
@@ -252,6 +296,8 @@ class Updater {
             await Overair.next({ id: update.bundle_id });
             await this.emit('APPLIED', update.bundle_id);
             this.log(`staged ${update.version}; it runs on the next launch`);
+            this.deferred = null;
+            this.acceptedId = null;
             return { reason, staged: true, deferred: null, reverted: false, update };
         }
         catch (error) {
@@ -363,4 +409,5 @@ var web = /*#__PURE__*/Object.freeze({
 
 exports.Overair = Overair;
 exports.OverairUpdater = OverairUpdater;
+exports.shouldDefer = shouldDefer;
 //# sourceMappingURL=plugin.cjs.js.map

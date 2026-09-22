@@ -280,14 +280,23 @@ reach.
 | Plugin methods run off the main queue | A webview touched from the background queue does nothing and says nothing. |
 | State still read `READY` after applying | A webview reload does not restart the process, so the native side outlives the web layer. |
 | The check overtook the confirmation | The device reported itself as running nothing and was re-offered what it was running. |
+| **A deferred update could not be accepted** | `SyncResult.deferred` was a manifest the app could display and nothing else: the `Updater` had no method to stage it. Every bundle over `auto_max_bytes` was a dead end, and no test noticed because the ceiling only bites on a real bundle's real size. |
+| **Retry did nothing for a deferred bundle** | `retry()` re-checks rather than replaying, so the ceiling deferred the very bundle the user had just agreed to. Download state stayed FAILED and the button was inert however often it was pressed. Fixed by remembering the accepted bundle id - a flag would have auto-downloaded the NEXT large update too. |
+| **A cancel hid the offer for the rest of the process** | The host gated its card on state `IDLE`, and only `notifyReady` returns the machine to IDLE. One tap on Stop and the user was never asked again until they force-quit. A host bug, but caused by the plugin having no state meaning "nothing in flight". |
 
 ---
 
 ## 10 · Open points
 
-- **Android is unverified end to end.** It compiles and its unit tests pass,
-  but no Android device has taken an update. The emulator would not authorise
-  over adb during testing.
+- **~~Android is unverified end to end.~~** Done, 22 Sep 2026: an Android
+  emulator took `1.0.0-android` over the deferred path - offered, accepted by
+  tap, downloaded, verified, unpacked, applied - and reported itself running
+  it on the next check. Both platforms are now proven against the live API.
+- **`os_version` is sent empty.** `run()` hardcodes `os_version: ''`, so the
+  console offers OS version as a targeting attribute and a rule on it matches
+  nobody - the empty string compares below every real version. Android has
+  `Build.VERSION.RELEASE`, iOS `UIDevice.current.systemVersion`; both belong in
+  `identity()` beside `appVersion`.
 - **No resume.** A cancelled or dropped download restarts from zero. iOS gives
   resume data for free via `cancel(byProducingResumeData:)`; Android would need
   a `Range` header. Worth doing before large bundles ship over patchy links.

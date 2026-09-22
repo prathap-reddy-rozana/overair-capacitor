@@ -23,11 +23,38 @@ export interface SyncResult {
      */
     update: Manifest | null;
 }
+/**
+ * Is this update too big to take without asking?
+ *
+ * The ceiling is the DEVICE's call because it is the only thing that knows it
+ * is on somebody's data plan. Two things override it: `mandatory`, because a
+ * build that is actively broken is worth the megabytes; and the user having
+ * already accepted this exact bundle, because re-asking after a failed
+ * download is how a retry button comes to do nothing at all.
+ *
+ * Keyed on the bundle id rather than a flag: agreeing to one large update is
+ * not agreeing to the next one.
+ */
+export declare function shouldDefer(update: Manifest, acceptedId: string | null): boolean;
 export interface UpdaterOptions {
-    /** Both default to the values in `capacitor.config`, which is where they
+    /** All four default to the values in `capacitor.config`, which is where they
      *  belong: the binary's own configuration, not the replaceable web layer. */
     apiUrl?: string;
     apiKey?: string;
+    /** Move this build to another channel without shipping a binary. Safe
+     *  because the head is still keyed on the runtime below: a wrong channel
+     *  can only ever reach bundles that declare this build's fingerprint. */
+    channel?: string;
+    /**
+     * Override the fingerprint this build claims to be.
+     *
+     * There is no guard behind this one - `runtime` IS the guard, and it is the
+     * only thing standing between a device and a bundle built for native code
+     * it does not have. Pass it ONLY from a source that cannot disagree with
+     * the binary, such as a table keyed on `identity.nativeBuild`. Never from a
+     * value an operator types free-hand.
+     */
+    runtime?: string;
     attrs?: Record<string, unknown>;
     customId?: string;
     debug?: boolean;
@@ -43,6 +70,11 @@ declare class Updater {
     private api;
     private options;
     private inFlight;
+    /** The last manifest held back by the size ceiling, for `accept`. */
+    private deferred;
+    /** The bundle the user has already said yes to. Per bundle id, not a flag:
+     *  agreeing to one large update is not agreeing to the next one. */
+    private acceptedId;
     /**
      * Ask the server, and act on the answer.
      *
@@ -81,6 +113,17 @@ declare class Updater {
     applyNow(): Promise<void>;
     /** Stop the download in flight. Safe when there is not one. */
     cancel(): Promise<void>;
+    /**
+     * Take an update that `sync` deferred.
+     *
+     * The ceiling in `auto_max_bytes` is a decision to ASK, not a refusal, so
+     * something has to be able to say yes. Without this the deferred manifest
+     * is a fact the app can display and nothing more.
+     *
+     * The install id is re-read rather than remembered: a deferred update can
+     * sit on screen for as long as the user leaves it there.
+     */
+    accept(update?: Manifest): Promise<SyncResult>;
     /**
      * Try again after a failed download.
      *
