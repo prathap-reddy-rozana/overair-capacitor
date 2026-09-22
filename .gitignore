@@ -1,5 +1,8 @@
 node_modules/
-dist/
+
+# dist IS committed. This package is consumed as a git dependency, and npm
+# does not reliably run `prepare` for one - so a consumer that cannot run
+# tsc and rollup would install a package with no JavaScript in it.
 *.tgz
 .DS_Store
 

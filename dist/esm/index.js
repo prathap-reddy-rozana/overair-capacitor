@@ -1,0 +1,203 @@
+import { Capacitor, registerPlugin } from '@capacitor/core';
+import { DeliveryApi } from './api';
+export * from './definitions';
+export * from './types';
+/** The native plugin. Use it directly for status and manual control; most
+ *  apps want `Updater` below instead. */
+export const Overair = registerPlugin('Overair', {
+    web: () => import('./web').then((m) => new m.OverairWeb()),
+});
+/**
+ * The protocol half of the SDK.
+ *
+ * Native decides what runs and owns the bytes; this decides what to ask for.
+ * Keeping them apart is why the boot decision can happen before any of this
+ * code exists.
+ */
+class Updater {
+    api = null;
+    options = {};
+    inFlight = null;
+    /**
+     * Ask the server, and act on the answer.
+     *
+     * Safe to call whenever - launch, resume, a button. A second call while
+     * one is running joins the first rather than starting a second download.
+     */
+    async sync(options = {}) {
+        this.options = { ...this.options, ...options };
+        if (this.inFlight)
+            return this.inFlight;
+        this.inFlight = this.run().finally(() => { this.inFlight = null; });
+        return this.inFlight;
+    }
+    /**
+     * Tell the platform this bundle started.
+     *
+     * An app that never calls this is treated as never having booted: the next
+     * launch rolls back before the webview loads. Call it after the first
+     * meaningful render, not in a constructor - the point is to prove the app
+     * actually works, not that a file parsed.
+     */
+    async notifyReady() {
+        await Overair.notifyReady();
+        const status = await Overair.status();
+        if (status.current)
+            await this.emit('READY', status.current.id);
+    }
+    /** What the webview is serving, or null on the build in the binary. */
+    async current() {
+        return (await Overair.status()).current;
+    }
+    /**
+     * Bytes as they arrive, throttled natively to about ten a second.
+     *
+     * The handle survives nothing: a bundle swap reloads the web layer and
+     * every listener with it. That is why the authoritative state is
+     * `status().download` and this is only the live feed.
+     */
+    async onProgress(listener) {
+        return Overair.addListener('downloadProgress', listener);
+    }
+    /** Every state change, including the terminal ones. `failure` is set only
+     *  on FAILED, and carries whether retrying is worth it. */
+    async onStateChange(listener) {
+        return Overair.addListener('downloadStateChanged', listener);
+    }
+    /** Stop the download in flight. Safe when there is not one. */
+    async cancel() {
+        await Overair.cancel();
+    }
+    /**
+     * Try the last failed download again.
+     *
+     * Rejects when nothing failed or the failure was not retryable, so a retry
+     * button can be disabled straight off `status().download.failure`.
+     */
+    async retry() {
+        const info = await Overair.retry();
+        await Overair.next({ id: info.id });
+        await this.emit('APPLIED', info.id);
+        return { reason: 'OFFERED', staged: true, deferred: null, reverted: false };
+    }
+    /** Where the current or most recent download got to. Unlike a listener,
+     *  this survives the web reload a bundle swap causes. */
+    async downloadStatus() {
+        return (await Overair.status()).download;
+    }
+    /** Back to the build compiled into the binary, forgetting the rest. */
+    async reset() {
+        await Overair.reset();
+        await this.emit('REVERTED');
+    }
+    async run() {
+        const idle = { reason: 'CHECKED', staged: false, deferred: null, reverted: false };
+        const identity = await Overair.identity();
+        const apiUrl = this.options.apiUrl ?? identity.apiUrl;
+        const apiKey = this.options.apiKey ?? identity.apiKey;
+        if (!apiUrl || !apiKey) {
+            this.log('no apiUrl/apiKey in capacitor.config or options; nothing to do');
+            return idle;
+        }
+        this.api = new DeliveryApi(apiUrl, apiKey);
+        const status = await Overair.status();
+        // A rollback happens natively, before any JavaScript exists to see it.
+        // This is the first moment it can be reported, and reporting it is the
+        // difference between a console that shows a failed release and one that
+        // shows a release nobody ever took.
+        if (status.rolledBack && status.rolledBackId) {
+            this.log(`rolled back ${status.rolledBackId} before boot`);
+            await this.emit('FAILED', status.rolledBackId, 'boot_failed');
+        }
+        let response;
+        try {
+            response = await this.api.check({
+                install_id: identity.installId,
+                platform: Capacitor.getPlatform(),
+                runtime: identity.runtime,
+                channel: identity.channel,
+                app_version: identity.appVersion,
+                build_number: identity.nativeBuild,
+                os_version: '',
+                locale: typeof navigator !== 'undefined' ? navigator.language : '',
+                custom_id: this.options.customId ?? '',
+                attrs: this.options.attrs ?? {},
+                current_bundle: status.current?.id ?? '',
+                quarantined: status.quarantined,
+            });
+        }
+        catch (error) {
+            // Offline is the normal case, not an error worth surfacing: the app
+            // runs on what it has and asks again next time.
+            this.log(`check failed: ${error.message}`);
+            return idle;
+        }
+        this.log(`check -> ${response.reason}`);
+        if (response.revert) {
+            await Overair.reset();
+            await this.emit('REVERTED');
+            return { reason: response.reason, staged: false, deferred: null, reverted: true };
+        }
+        const update = response.update;
+        if (!update)
+            return { ...idle, reason: response.reason };
+        // The ceiling is the device's call because it is the only thing that
+        // knows it is on somebody's data plan. Mandatory overrides it: a build
+        // that is actively broken is worth the megabytes.
+        if (update.auto_max_bytes > 0 && update.size > update.auto_max_bytes && !update.mandatory) {
+            this.log(`deferred ${update.version}: ${update.size} over ${update.auto_max_bytes}`);
+            return { reason: response.reason, staged: false, deferred: update, reverted: false };
+        }
+        return this.stage(update, response.reason, identity.installId);
+    }
+    async stage(update, reason, installId) {
+        await this.emit('DOWNLOAD_STARTED', update.bundle_id);
+        try {
+            await Overair.download({
+                id: update.bundle_id,
+                version: update.version,
+                url: update.url,
+                checksum: update.sha256,
+            });
+            await this.emit('DOWNLOADED', update.bundle_id);
+            await Overair.next({ id: update.bundle_id });
+            await this.emit('APPLIED', update.bundle_id);
+            this.log(`staged ${update.version}; it runs on the next launch`);
+            return { reason, staged: true, deferred: null, reverted: false };
+        }
+        catch (error) {
+            const message = error.message;
+            this.log(`staging failed: ${message}`);
+            // NOT quarantined: this is a download or disk failure, not a bundle
+            // that cannot run. Refusing it forever would refuse bytes never tried.
+            await this.emit('FAILED', update.bundle_id, 'stage_failed', { message, installId });
+            return { reason, staged: false, deferred: null, reverted: false };
+        }
+    }
+    /** Telemetry never makes a device wait, and a failed report must never
+     *  fail the update it was describing. */
+    async emit(type, bundle, errorCode, detail) {
+        try {
+            const { installId } = await Overair.identity();
+            const event = {
+                install_id: installId,
+                type,
+                bundle: bundle ?? '',
+                error_code: errorCode ?? '',
+                detail: detail ?? {},
+            };
+            await this.api?.report([event]);
+        }
+        catch {
+            // Dropped on purpose. The console being blind for one event is a
+            // smaller problem than an update failing because reporting did.
+        }
+    }
+    log(message) {
+        if (this.options.debug)
+            console.log(`[overair] ${message}`);
+    }
+}
+/** One instance: two of these racing would be two answers to a question
+ *  that has one, and both would download. */
+export const OverairUpdater = new Updater();
