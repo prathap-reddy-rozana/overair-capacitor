@@ -281,7 +281,13 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
         }
         store.pending = true
         call.resolve()
-        bridge?.setServerBasePath(staged.path)
+        // Capacitor runs plugin methods off the main queue, and this touches
+        // the webview. Called on the background queue it does nothing at all -
+        // the call resolves, the app reports APPLIED, and the page never
+        // changes. `load()` works only because it is already on main.
+        DispatchQueue.main.async { [weak self] in
+            self?.bridge?.setServerBasePath(staged.path)
+        }
     }
 
     /// Make a downloaded bundle the one the next launch serves.
@@ -314,6 +320,13 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
             bundles.prune(keep: Set([staged.id, store.previous?.id].compactMap { $0 }))
         }
         store.pending = false
+        // The update has landed. Without this the state machine still reads
+        // READY after the swap, and the app offers an update it just applied.
+        state = "IDLE"
+        bytes = 0
+        total = 0
+        failure = nil
+        notifyListeners("downloadStateChanged", data: downloadStatus())
         call.resolve()
     }
 
@@ -338,26 +351,28 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
         store.previous = nil
         store.next = nil
         store.pending = false
-        if let target = store.active {
-            bridge?.setServerBasePath(target.path)
-            call.resolve(["rolledBackTo": target.version])
-        } else {
-            if let embedded = Bundle.main.url(forResource: "public", withExtension: nil) {
-                bridge?.setServerBasePath(embedded.path)
+        let target = store.active
+        call.resolve(["rolledBackTo": target?.version ?? "embedded"])
+        DispatchQueue.main.async { [weak self] in
+            if let target {
+                self?.bridge?.setServerBasePath(target.path)
+            } else if let embedded = Bundle.main.url(forResource: "public", withExtension: nil) {
+                self?.bridge?.setServerBasePath(embedded.path)
             }
-            call.resolve(["rolledBackTo": "embedded"])
         }
     }
 
     @objc func reset(_ call: CAPPluginCall) {
         store.forgetBundles()
         bundles.removeAll()
+        call.resolve()
         // Mid-session, the webview IS serving a bundle, so going back needs an
         // explicit path to the assets in the binary - "" would serve nothing.
-        if let embedded = Bundle.main.url(forResource: "public", withExtension: nil) {
-            bridge?.setServerBasePath(embedded.path)
+        DispatchQueue.main.async {
+            if let embedded = Bundle.main.url(forResource: "public", withExtension: nil) {
+                self.bridge?.setServerBasePath(embedded.path)
+            }
         }
-        call.resolve()
     }
 
     @objc func prune(_ call: CAPPluginCall) {

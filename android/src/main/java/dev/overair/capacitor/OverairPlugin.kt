@@ -307,6 +307,13 @@ class OverairPlugin : Plugin() {
             bundles.prune(setOfNotNull(staged.id, store.previous?.id))
         }
         store.pending = false
+        // The update has landed. Without this the state machine still reads
+        // READY after the swap, and the app offers an update it just applied.
+        state = "IDLE"
+        bytes = 0
+        total = 0
+        failure = null
+        notifyListeners("downloadStateChanged", downloadStatus())
         call.resolve()
     }
 
