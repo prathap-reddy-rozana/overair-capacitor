@@ -1,6 +1,8 @@
 package dev.overair.capacitor
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import com.getcapacitor.JSArray
 import com.getcapacitor.JSObject
 import com.getcapacitor.Plugin
@@ -93,7 +95,19 @@ class OverairPlugin : Plugin() {
                     return
                 }
                 store.pending = decision.isFirstBoot
-                bridge.setServerBasePath(record.path)
+                // NOT called directly. `load()` runs inside Bridge.<init>, from
+                // registerAllPlugins(), and the Bridge builds its local server
+                // forty lines LATER - so a direct call dereferences null, Capacitor
+                // wraps it as PluginLoadException, and this plugin is dropped for
+                // the whole session: the embedded assets serve and OTA is dead
+                // until reinstall. Every cold start after the first apply hit it.
+                //
+                // Posting to the main looper is enough: the constructor is
+                // synchronous on that thread, so by the time this runs the server
+                // exists. The cost is one frame of the embedded app before the
+                // swap, which setServerBasePath's own loadUrl replaces.
+                val path = record.path
+                Handler(Looper.getMainLooper()).post { bridge.setServerBasePath(path) }
             }
         }
     }

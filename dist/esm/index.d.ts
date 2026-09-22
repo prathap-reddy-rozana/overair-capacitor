@@ -78,6 +78,16 @@ declare class Updater {
     /** The bundle the user has already said yes to. Per bundle id, not a flag:
      *  agreeing to one large update is not agreeing to the next one. */
     private acceptedId;
+    /**
+     * Events raised before an endpoint was known.
+     *
+     * `notifyReady` runs BEFORE the first sync on purpose - the watchdog has to
+     * be satisfied before a check can overtake it - so the READY it emits has
+     * nowhere to go yet. `this.api?.report(...)` turned that into a silent
+     * no-op, which left `ready` at zero for every real fleet while
+     * `pause_below_ready_bps` was reading exactly that number.
+     */
+    private queued;
     /** Its OWN guard, not `inFlight`. Joining a check would resolve with that
      *  check's answer - deferred - and the tap would look like it did nothing. */
     private accepting;
@@ -163,6 +173,9 @@ declare class Updater {
     /** Telemetry never makes a device wait, and a failed report must never
      *  fail the update it was describing. */
     private emit;
+    /** Send whatever was raised before the endpoint was known. Same bargain as
+     *  `emit`: reporting must never be why an update fails. */
+    private flushQueued;
     private log;
 }
 /** One instance: two of these racing would be two answers to a question

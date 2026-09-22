@@ -26,6 +26,9 @@ export function shouldDefer(update, acceptedId) {
         return false;
     return update.auto_max_bytes > 0 && update.size > update.auto_max_bytes;
 }
+/** How many pre-endpoint events to hold. One launch raises at most a couple;
+ *  the cap only matters for a build that never syncs at all. */
+const QUEUED_EVENT_LIMIT = 20;
 /**
  * The protocol half of the SDK.
  *
@@ -42,6 +45,16 @@ class Updater {
     /** The bundle the user has already said yes to. Per bundle id, not a flag:
      *  agreeing to one large update is not agreeing to the next one. */
     acceptedId = null;
+    /**
+     * Events raised before an endpoint was known.
+     *
+     * `notifyReady` runs BEFORE the first sync on purpose - the watchdog has to
+     * be satisfied before a check can overtake it - so the READY it emits has
+     * nowhere to go yet. `this.api?.report(...)` turned that into a silent
+     * no-op, which left `ready` at zero for every real fleet while
+     * `pause_below_ready_bps` was reading exactly that number.
+     */
+    queued = [];
     /** Its OWN guard, not `inFlight`. Joining a check would resolve with that
      *  check's answer - deferred - and the tap would look like it did nothing. */
     accepting = null;
@@ -189,6 +202,7 @@ class Updater {
             return idle;
         }
         this.api = new DeliveryApi(apiUrl, apiKey);
+        await this.flushQueued();
         const status = await Overair.status();
         // A rollback happens natively, before any JavaScript exists to see it.
         // This is the first moment it can be reported, and reporting it is the
@@ -290,11 +304,32 @@ class Updater {
                 error_code: errorCode ?? '',
                 detail: detail ?? {},
             };
-            await this.api?.report([event]);
+            if (!this.api) {
+                // Held, not dropped. Bounded, because a build with OTA switched off
+                // never syncs and this would otherwise grow for the life of the app.
+                if (this.queued.length < QUEUED_EVENT_LIMIT)
+                    this.queued.push(event);
+                return;
+            }
+            await this.api.report([event]);
         }
         catch {
             // Dropped on purpose. The console being blind for one event is a
             // smaller problem than an update failing because reporting did.
+        }
+    }
+    /** Send whatever was raised before the endpoint was known. Same bargain as
+     *  `emit`: reporting must never be why an update fails. */
+    async flushQueued() {
+        if (!this.api || this.queued.length === 0)
+            return;
+        const pending = this.queued;
+        this.queued = [];
+        try {
+            await this.api.report(pending);
+        }
+        catch {
+            // Same as emit.
         }
     }
     log(message) {
