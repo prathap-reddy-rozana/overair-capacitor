@@ -56,79 +56,102 @@ const config: CapacitorConfig = {
 ```ts
 import { OverairUpdater } from '@overair/capacitor';
 
-// Anywhere after startup. Safe to call on launch and on resume.
-await OverairUpdater.sync();
-
-// After your first meaningful render.
-await OverairUpdater.notifyReady();
+// main.ts, BEFORE the app bootstraps. Not behind your app's own
+// initialisation: an update is most needed exactly when the app cannot
+// finish starting.
+await OverairUpdater.notifyReady();   // confirm this boot
+await OverairUpdater.sync();          // then check
 ```
 
-`sync()` checks, downloads, verifies and stages. The update runs on the **next
-launch** - never mid-session, because swapping the web root under a running app
-means reloading it under the user.
+`notifyReady()` must come first. It is what promotes a staged bundle to
+current; a check that overtakes it reports the device as running nothing, and
+the server offers back the bundle it is already running.
+
+`sync()` checks, downloads, verifies and unpacks. The update runs on the
+**next launch** unless you apply it sooner.
 
 ```ts
 const result = await OverairUpdater.sync();
-result.staged     // downloaded and verified; runs next launch
+result.staged     // downloaded and verified
 result.deferred   // offered but over auto_max_bytes - your call
-result.reverted   // the server asked this device back to its embedded build
+result.reverted   // the server sent this device back to its embedded build
+result.update     // the manifest: version, size, and `mandatory`
 result.reason     // why, including every refusal
 ```
 
-A bundle larger than the server's `auto_max_bytes` is **not** downloaded
-automatically, because the device is the only thing that knows it is on
-somebody's data plan. Prompt, then call `sync()` again when the user agrees.
-
 ## Progress, cancel, retry
 
-A 40 MB download on a phone needs a progress bar and a way out of it.
-
 ```ts
-const handle = await OverairUpdater.onProgress(({ fraction, bytes, total }) => {
-  // fraction is -1 when the server sends no content length
-  bar.value = fraction;
+await OverairUpdater.onProgress(({ fraction, bytes, total }) => {
+  bar.value = fraction;   // -1 when the server sends no content length
 });
 
-await OverairUpdater.cancel();   // safe whether or not one is running
-handle.remove();
-```
-
-Every state change is its own event - `DOWNLOADING`, `VERIFYING`, `UNPACKING`,
-`READY`, `FAILED`, `CANCELLED`:
-
-```ts
 await OverairUpdater.onStateChange(({ state, failure }) => {
+  if (state === 'READY') showUpdateButton();
   if (state === 'FAILED' && failure?.retryable) showRetry();
 });
 
-await OverairUpdater.retry();    // rejects when the failure was not retryable
+await OverairUpdater.cancel();   // safe whether or not one is running
+await OverairUpdater.retry();    // rejects when the failure is not retryable
 ```
 
-**`retry()` refuses a digest mismatch**, because the same URL will produce the
-same wrong bytes and retrying it forever is how a device burns a data plan on
-nothing. `failure.retryable` says so before you offer the button.
+States are `DOWNLOADING`, `VERIFYING`, `UNPACKING`, `READY`, `FAILED`,
+`CANCELLED`. Verifying and unpacking are separate because they are separately
+slow and separately able to fail.
 
-Listeners do not survive a bundle swap - it reloads the web layer and every
-listener with it. The authoritative state is native and outlives that:
+**`retry()` re-checks rather than replaying.** Download URLs are presigned and
+short-lived; replaying one re-uses a link that may have expired. It refuses a
+`digest` failure outright - the bytes on the server are wrong, and a fresh link
+fetches the same wrong bytes.
+
+Listeners do not survive a bundle swap, which reloads the web layer. The
+authoritative state is native and outlives it:
 
 ```ts
 const { state, fraction, failure } = await OverairUpdater.downloadStatus();
 ```
 
-## Every capability
+## Applying an update
 
-| | |
-|---|---|
-| Check for an update | `sync()` |
-| Download | `sync()`, or `Overair.download()` directly |
-| Download status | `downloadStatus()`, or `status().download` |
-| Download progress | `onProgress()` - throttled natively to ~10/s |
-| Failure detail | `failure.code` (`network` `http` `digest` `unpack` `cancelled`) and `failure.retryable` |
-| Cancel | `cancel()` |
-| Retry | `retry()`, refused when not retryable |
-| Revert | `reset()`, plus automatic rollback on a failed boot |
-| Refuse a bundle forever | `Overair.quarantine()` |
-| Free disk | `Overair.prune()` |
+```ts
+await OverairUpdater.applyNow();   // reloads the webview into the new bundle
+```
+
+**The reload is the restart.** An iOS app cannot relaunch itself - `exit()`
+reads as a crash and is rejected in review - and killing the process drops the
+user on a home screen with no explanation. A reload replaces the whole web
+layer, which is the part an update replaces anyway.
+
+Nothing runs after this call: the page that made it is gone. Ask the user
+first, because anything unsaved on screen goes with it.
+
+## Force update
+
+`result.update?.mandatory` is set by the **server**, on the release. A client
+that could decide this itself could lock out its own user.
+
+When it is set, block: no dismiss, nothing else reachable, one action. The SDK
+also ignores `auto_max_bytes` for a mandatory release - a build that is
+actively broken is worth the megabytes.
+
+## When something breaks
+
+Two different failures, two different answers.
+
+**A bundle that never starts** is caught with no help from you: it is
+quarantined before the webview loads on the next launch, and its predecessor
+takes over. Embedded is the floor, not the first resort.
+
+**A bundle that starts and is then plainly broken** only the app can see:
+
+```ts
+const { rolledBackTo } = await OverairUpdater.rollback();
+```
+
+That refuses the current bundle forever and steps back one. `reset()` is the
+blunt instrument that drops all the way to the binary; `rollback()` is almost
+always what you want, because it costs the user one update rather than all of
+them.
 
 ## What happens on a launch
 
@@ -136,7 +159,7 @@ const { state, fraction, failure } = await OverairUpdater.downloadStatus();
 2. If the native build changed, every staged bundle is dropped - they were
    unpacked for a binary that no longer exists.
 3. If the last launch served a bundle that never confirmed, that bundle is
-   quarantined and the last **working** one takes over.
+   quarantined and its predecessor takes over - one update lost, not all.
 4. Otherwise the newest verified bundle is served.
 5. Your app calls `notifyReady()`, which promotes it and stops the watchdog.
 
@@ -161,10 +184,19 @@ from an app that has this plugin installed.
 `swift build` alone will not work: it targets macOS, and Capacitor's
 xcframework is iOS-only.
 
+`dist/` is committed on purpose. This is consumed as a git dependency, and npm
+does not reliably run `prepare` for one - without it a consumer installs a
+package with no JavaScript in it. Rebuild it in the same commit as any
+TypeScript change.
+
 ## Not yet
 
+- **Android is unverified end to end.** It compiles and its unit tests pass,
+  but no Android device has taken an update.
 - **Deltas.** The server offers them; this downloads the full bundle. Safe to
   defer because the full URL is always offered beside a delta.
+- **No resume.** A cancelled or dropped download restarts from zero.
 - **Background download.** Updates land on launch and resume.
-- **A bundle that confirms and later crashes** is not caught. The watchdog
-  proves the app reached first render, not that it works.
+- **A bundle that confirms and later crashes** is not caught automatically.
+  The watchdog proves the app reached first render, not that it works -
+  `rollback()` is there for when the app knows better.
