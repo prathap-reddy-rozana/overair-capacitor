@@ -66,10 +66,16 @@ declare class Updater {
     /** Stop the download in flight. Safe when there is not one. */
     cancel(): Promise<void>;
     /**
-     * Try the last failed download again.
+     * Try again after a failed download.
      *
-     * Rejects when nothing failed or the failure was not retryable, so a retry
-     * button can be disabled straight off `status().download.failure`.
+     * Deliberately a fresh check rather than a replay of the attempt that
+     * failed. The download URL is PRESIGNED and short-lived: replaying it
+     * re-uses a link that may already have expired, or that points at an
+     * object the server has since moved - a button that cannot work however
+     * many times it is pressed. One small request buys a URL that can.
+     *
+     * `retryable` is still honoured: a digest mismatch means the bytes on the
+     * server are wrong, and a fresh link fetches the same wrong bytes.
      */
     retry(): Promise<SyncResult>;
     /** Where the current or most recent download got to. Unlike a listener,
