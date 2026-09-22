@@ -148,6 +148,14 @@ class Updater {
             this.log(`deferred ${update.version}: ${update.size} over ${update.auto_max_bytes}`);
             return { reason: response.reason, staged: false, deferred: update, reverted: false };
         }
+        // Already on disk and waiting for the next launch. The server keeps
+        // OFFERING it until this device reports it as current, which only
+        // happens after notifyReady - so without this check every launch in
+        // between re-downloads a bundle we already have.
+        if (status.next?.id === update.bundle_id) {
+            this.log(`${update.version} is already staged; not downloading again`);
+            return { reason: response.reason, staged: true, deferred: null, reverted: false };
+        }
         return this.stage(update, response.reason, identity.installId);
     }
     async stage(update, reason, installId) {
