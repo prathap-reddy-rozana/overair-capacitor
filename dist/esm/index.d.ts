@@ -50,9 +50,12 @@ export interface UpdaterOptions {
      *
      * There is no guard behind this one - `runtime` IS the guard, and it is the
      * only thing standing between a device and a bundle built for native code
-     * it does not have. Pass it ONLY from a source that cannot disagree with
-     * the binary, such as a table keyed on `identity.nativeBuild`. Never from a
-     * value an operator types free-hand.
+     * it does not have. Nothing checks an override against the binary, because
+     * nothing can: a value that disagrees will be believed.
+     *
+     * Keying it on `identity.nativeBuild` removes that risk; a plain remote
+     * string does not, and is a choice to make with the risk in view. Empty
+     * keeps whatever the binary was built with.
      */
     runtime?: string;
     attrs?: Record<string, unknown>;
@@ -75,6 +78,9 @@ declare class Updater {
     /** The bundle the user has already said yes to. Per bundle id, not a flag:
      *  agreeing to one large update is not agreeing to the next one. */
     private acceptedId;
+    /** Its OWN guard, not `inFlight`. Joining a check would resolve with that
+     *  check's answer - deferred - and the tap would look like it did nothing. */
+    private accepting;
     /**
      * Ask the server, and act on the answer.
      *

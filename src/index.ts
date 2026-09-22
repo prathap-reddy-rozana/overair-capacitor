@@ -64,9 +64,12 @@ export interface UpdaterOptions {
    *
    * There is no guard behind this one - `runtime` IS the guard, and it is the
    * only thing standing between a device and a bundle built for native code
-   * it does not have. Pass it ONLY from a source that cannot disagree with
-   * the binary, such as a table keyed on `identity.nativeBuild`. Never from a
-   * value an operator types free-hand.
+   * it does not have. Nothing checks an override against the binary, because
+   * nothing can: a value that disagrees will be believed.
+   *
+   * Keying it on `identity.nativeBuild` removes that risk; a plain remote
+   * string does not, and is a choice to make with the risk in view. Empty
+   * keeps whatever the binary was built with.
    */
   runtime?: string;
   attrs?: Record<string, unknown>;
@@ -90,6 +93,9 @@ class Updater {
   /** The bundle the user has already said yes to. Per bundle id, not a flag:
    *  agreeing to one large update is not agreeing to the next one. */
   private acceptedId: string | null = null;
+  /** Its OWN guard, not `inFlight`. Joining a check would resolve with that
+   *  check's answer - deferred - and the tap would look like it did nothing. */
+  private accepting: Promise<SyncResult> | null = null;
 
   /**
    * Ask the server, and act on the answer.
@@ -168,12 +174,19 @@ class Updater {
   async accept(update?: Manifest): Promise<SyncResult> {
     const manifest = update ?? this.deferred;
     if (!manifest) throw new Error('nothing deferred to accept');
+    // A second tap joins the first rather than starting a download native
+    // would refuse - that refusal used to be reported as a release failing on
+    // a handset when nothing had.
+    if (this.accepting) return this.accepting;
     // Remembered BEFORE staging, so a download that fails can still be
     // retried: `retry` re-checks, and the ceiling would otherwise defer the
     // very bundle this call was agreeing to.
     this.acceptedId = manifest.bundle_id;
-    const identity = await Overair.identity();
-    return this.stage(manifest, 'OFFERED', identity.installId);
+    this.accepting = (async () => {
+      const identity = await Overair.identity();
+      return this.stage(manifest, 'OFFERED', identity.installId);
+    })().finally(() => { this.accepting = null; });
+    return this.accepting;
   }
 
   /**

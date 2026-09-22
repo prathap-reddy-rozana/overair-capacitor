@@ -84,6 +84,9 @@ class Updater {
     /** The bundle the user has already said yes to. Per bundle id, not a flag:
      *  agreeing to one large update is not agreeing to the next one. */
     acceptedId = null;
+    /** Its OWN guard, not `inFlight`. Joining a check would resolve with that
+     *  check's answer - deferred - and the tap would look like it did nothing. */
+    accepting = null;
     /**
      * Ask the server, and act on the answer.
      *
@@ -157,12 +160,20 @@ class Updater {
         const manifest = update ?? this.deferred;
         if (!manifest)
             throw new Error('nothing deferred to accept');
+        // A second tap joins the first rather than starting a download native
+        // would refuse - that refusal used to be reported as a release failing on
+        // a handset when nothing had.
+        if (this.accepting)
+            return this.accepting;
         // Remembered BEFORE staging, so a download that fails can still be
         // retried: `retry` re-checks, and the ceiling would otherwise defer the
         // very bundle this call was agreeing to.
         this.acceptedId = manifest.bundle_id;
-        const identity = await Overair.identity();
-        return this.stage(manifest, 'OFFERED', identity.installId);
+        this.accepting = (async () => {
+            const identity = await Overair.identity();
+            return this.stage(manifest, 'OFFERED', identity.installId);
+        })().finally(() => { this.accepting = null; });
+        return this.accepting;
     }
     /**
      * Try again after a failed download.
