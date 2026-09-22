@@ -32,11 +32,46 @@ export interface SyncResult {
   update: Manifest | null;
 }
 
+/**
+ * Is this update too big to take without asking?
+ *
+ * The ceiling is the DEVICE's call because it is the only thing that knows it
+ * is on somebody's data plan. Two things override it: `mandatory`, because a
+ * build that is actively broken is worth the megabytes; and the user having
+ * already accepted this exact bundle, because re-asking after a failed
+ * download is how a retry button comes to do nothing at all.
+ *
+ * Keyed on the bundle id rather than a flag: agreeing to one large update is
+ * not agreeing to the next one.
+ */
+export function shouldDefer(update: Manifest, acceptedId: string | null): boolean {
+  if (update.mandatory) return false;
+  if (update.bundle_id === acceptedId) return false;
+  return update.auto_max_bytes > 0 && update.size > update.auto_max_bytes;
+}
+
 export interface UpdaterOptions {
-  /** Both default to the values in `capacitor.config`, which is where they
+  /** All four default to the values in `capacitor.config`, which is where they
    *  belong: the binary's own configuration, not the replaceable web layer. */
   apiUrl?: string;
   apiKey?: string;
+  /** Move this build to another channel without shipping a binary. Safe
+   *  because the head is still keyed on the runtime below: a wrong channel
+   *  can only ever reach bundles that declare this build's fingerprint. */
+  channel?: string;
+  /**
+   * Override the fingerprint this build claims to be.
+   *
+   * There is no guard behind this one - `runtime` IS the guard, and it is the
+   * only thing standing between a device and a bundle built for native code
+   * it does not have. Nothing checks an override against the binary, because
+   * nothing can: a value that disagrees will be believed.
+   *
+   * Keying it on `identity.nativeBuild` removes that risk; a plain remote
+   * string does not, and is a choice to make with the risk in view. Empty
+   * keeps whatever the binary was built with.
+   */
+  runtime?: string;
   attrs?: Record<string, unknown>;
   customId?: string;
   debug?: boolean;
@@ -53,6 +88,14 @@ class Updater {
   private api: DeliveryApi | null = null;
   private options: UpdaterOptions = {};
   private inFlight: Promise<SyncResult> | null = null;
+  /** The last manifest held back by the size ceiling, for `accept`. */
+  private deferred: Manifest | null = null;
+  /** The bundle the user has already said yes to. Per bundle id, not a flag:
+   *  agreeing to one large update is not agreeing to the next one. */
+  private acceptedId: string | null = null;
+  /** Its OWN guard, not `inFlight`. Joining a check would resolve with that
+   *  check's answer - deferred - and the tap would look like it did nothing. */
+  private accepting: Promise<SyncResult> | null = null;
 
   /**
    * Ask the server, and act on the answer.
@@ -116,6 +159,34 @@ class Updater {
   /** Stop the download in flight. Safe when there is not one. */
   async cancel(): Promise<void> {
     await Overair.cancel();
+  }
+
+  /**
+   * Take an update that `sync` deferred.
+   *
+   * The ceiling in `auto_max_bytes` is a decision to ASK, not a refusal, so
+   * something has to be able to say yes. Without this the deferred manifest
+   * is a fact the app can display and nothing more.
+   *
+   * The install id is re-read rather than remembered: a deferred update can
+   * sit on screen for as long as the user leaves it there.
+   */
+  async accept(update?: Manifest): Promise<SyncResult> {
+    const manifest = update ?? this.deferred;
+    if (!manifest) throw new Error('nothing deferred to accept');
+    // A second tap joins the first rather than starting a download native
+    // would refuse - that refusal used to be reported as a release failing on
+    // a handset when nothing had.
+    if (this.accepting) return this.accepting;
+    // Remembered BEFORE staging, so a download that fails can still be
+    // retried: `retry` re-checks, and the ceiling would otherwise defer the
+    // very bundle this call was agreeing to.
+    this.acceptedId = manifest.bundle_id;
+    this.accepting = (async () => {
+      const identity = await Overair.identity();
+      return this.stage(manifest, 'OFFERED', identity.installId);
+    })().finally(() => { this.accepting = null; });
+    return this.accepting;
   }
 
   /**
@@ -193,8 +264,8 @@ class Updater {
       response = await this.api.check({
         install_id: identity.installId,
         platform: Capacitor.getPlatform() as Platform,
-        runtime: identity.runtime,
-        channel: identity.channel,
+        runtime: this.options.runtime || identity.runtime,
+        channel: this.options.channel || identity.channel,
         app_version: identity.appVersion,
         build_number: identity.nativeBuild,
         os_version: '',
@@ -221,13 +292,12 @@ class Updater {
     }
 
     const update = response.update;
+    this.deferred = null;
     if (!update) return { ...idle, reason: response.reason };
 
-    // The ceiling is the device's call because it is the only thing that
-    // knows it is on somebody's data plan. Mandatory overrides it: a build
-    // that is actively broken is worth the megabytes.
-    if (update.auto_max_bytes > 0 && update.size > update.auto_max_bytes && !update.mandatory) {
+    if (shouldDefer(update, this.acceptedId)) {
       this.log(`deferred ${update.version}: ${update.size} over ${update.auto_max_bytes}`);
+      this.deferred = update;
       return {
         reason: response.reason, staged: false, deferred: update, reverted: false, update,
       };
@@ -260,6 +330,8 @@ class Updater {
       await Overair.next({ id: update.bundle_id });
       await this.emit('APPLIED', update.bundle_id);
       this.log(`staged ${update.version}; it runs on the next launch`);
+      this.deferred = null;
+      this.acceptedId = null;
       return { reason, staged: true, deferred: null, reverted: false, update };
     } catch (error) {
       const message = (error as Error).message;
