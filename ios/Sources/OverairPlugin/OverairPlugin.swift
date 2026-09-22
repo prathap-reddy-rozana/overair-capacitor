@@ -19,6 +19,7 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "download", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "cancel", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "retry", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "applyNow", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "next", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "notifyReady", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "quarantine", returnType: CAPPluginReturnPromise),
@@ -260,6 +261,27 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
             "id": id, "state": state, "bytes": bytes,
             "total": total, "fraction": fraction(),
         ])
+    }
+
+    /// Serve the staged bundle NOW, reloading the webview into it.
+    ///
+    /// The webview reload IS the restart: an iOS app cannot relaunch itself
+    /// (calling exit reads as a crash and is rejected by review), and killing
+    /// the process would drop the user on a home screen with no explanation.
+    /// Reloading swaps the entire web layer in place, which is the part an
+    /// over-the-air update actually replaces.
+    ///
+    /// `pending` is set exactly as on a launch-time swap, so a bundle that
+    /// fails to start here is rolled back on the next launch by the same
+    /// watchdog and needs no separate path.
+    @objc func applyNow(_ call: CAPPluginCall) {
+        guard let staged = store.next else { return call.reject("nothing staged to apply") }
+        guard FileManager.default.fileExists(atPath: staged.path) else {
+            return call.reject("staged bundle is missing on disk")
+        }
+        store.pending = true
+        call.resolve()
+        bridge?.setServerBasePath(staged.path)
     }
 
     /// Make a downloaded bundle the one the next launch serves.

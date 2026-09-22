@@ -7,12 +7,21 @@ export * from './types';
 export declare const Overair: OverairPlugin;
 export interface SyncResult {
     reason: Reason;
-    /** Downloaded, verified and unpacked. It runs on the next launch. */
+    /** Downloaded, verified and unpacked. It runs on the next launch, or now
+     *  if the app calls `applyNow()`. */
     staged: boolean;
     /** Offered, but over `auto_max_bytes` and left for the app to decide. */
     deferred: Manifest | null;
     /** The server asked this device back to the build in its binary. */
     reverted: boolean;
+    /**
+     * Whatever was offered, staged or deferred.
+     *
+     * Carries `mandatory`, which decides whether the app may let someone keep
+     * working - and the version and size, which are the only things worth
+     * showing a person about an update.
+     */
+    update: Manifest | null;
 }
 export interface UpdaterOptions {
     /** Both default to the values in `capacitor.config`, which is where they
@@ -63,6 +72,13 @@ declare class Updater {
     /** Every state change, including the terminal ones. `failure` is set only
      *  on FAILED, and carries whether retrying is worth it. */
     onStateChange(listener: (status: DownloadStatus) => void): Promise<import("@capacitor/core").PluginListenerHandle>;
+    /**
+     * Serve the staged bundle now, reloading the webview into it.
+     *
+     * Nothing runs after this: the page that called it is replaced. Confirm
+     * with the user first, because anything unsaved on screen goes with it.
+     */
+    applyNow(): Promise<void>;
     /** Stop the download in flight. Safe when there is not one. */
     cancel(): Promise<void>;
     /**

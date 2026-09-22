@@ -105,6 +105,15 @@ var capacitorOverair = (function (exports, core) {
         async onStateChange(listener) {
             return Overair.addListener('downloadStateChanged', listener);
         }
+        /**
+         * Serve the staged bundle now, reloading the webview into it.
+         *
+         * Nothing runs after this: the page that called it is replaced. Confirm
+         * with the user first, because anything unsaved on screen goes with it.
+         */
+        async applyNow() {
+            await Overair.applyNow();
+        }
         /** Stop the download in flight. Safe when there is not one. */
         async cancel() {
             await Overair.cancel();
@@ -154,7 +163,9 @@ var capacitorOverair = (function (exports, core) {
             await this.emit('REVERTED');
         }
         async run() {
-            const idle = { reason: 'CHECKED', staged: false, deferred: null, reverted: false };
+            const idle = {
+                reason: 'CHECKED', staged: false, deferred: null, reverted: false, update: null,
+            };
             const identity = await Overair.identity();
             const apiUrl = this.options.apiUrl ?? identity.apiUrl;
             const apiKey = this.options.apiKey ?? identity.apiKey;
@@ -199,7 +210,9 @@ var capacitorOverair = (function (exports, core) {
             if (response.revert) {
                 await Overair.reset();
                 await this.emit('REVERTED');
-                return { reason: response.reason, staged: false, deferred: null, reverted: true };
+                return {
+                    reason: response.reason, staged: false, deferred: null, reverted: true, update: null,
+                };
             }
             const update = response.update;
             if (!update)
@@ -209,7 +222,9 @@ var capacitorOverair = (function (exports, core) {
             // that is actively broken is worth the megabytes.
             if (update.auto_max_bytes > 0 && update.size > update.auto_max_bytes && !update.mandatory) {
                 this.log(`deferred ${update.version}: ${update.size} over ${update.auto_max_bytes}`);
-                return { reason: response.reason, staged: false, deferred: update, reverted: false };
+                return {
+                    reason: response.reason, staged: false, deferred: update, reverted: false, update,
+                };
             }
             // Already on disk and waiting for the next launch. The server keeps
             // OFFERING it until this device reports it as current, which only
@@ -217,7 +232,9 @@ var capacitorOverair = (function (exports, core) {
             // between re-downloads a bundle we already have.
             if (status.next?.id === update.bundle_id) {
                 this.log(`${update.version} is already staged; not downloading again`);
-                return { reason: response.reason, staged: true, deferred: null, reverted: false };
+                return {
+                    reason: response.reason, staged: true, deferred: null, reverted: false, update,
+                };
             }
             return this.stage(update, response.reason, identity.installId);
         }
@@ -234,7 +251,7 @@ var capacitorOverair = (function (exports, core) {
                 await Overair.next({ id: update.bundle_id });
                 await this.emit('APPLIED', update.bundle_id);
                 this.log(`staged ${update.version}; it runs on the next launch`);
-                return { reason, staged: true, deferred: null, reverted: false };
+                return { reason, staged: true, deferred: null, reverted: false, update };
             }
             catch (error) {
                 const message = error.message;
@@ -242,7 +259,7 @@ var capacitorOverair = (function (exports, core) {
                 // NOT quarantined: this is a download or disk failure, not a bundle
                 // that cannot run. Refusing it forever would refuse bytes never tried.
                 await this.emit('FAILED', update.bundle_id, 'stage_failed', { message, installId });
-                return { reason, staged: false, deferred: null, reverted: false };
+                return { reason, staged: false, deferred: null, reverted: false, update };
             }
         }
         /** Telemetry never makes a device wait, and a failed report must never
@@ -308,6 +325,9 @@ var capacitorOverair = (function (exports, core) {
             throw this.unavailable('Bundles are only downloaded on a device.');
         }
         async next(_options) {
+            throw this.unavailable('Bundles are only applied on a device.');
+        }
+        async applyNow() {
             throw this.unavailable('Bundles are only applied on a device.');
         }
         async cancel() {

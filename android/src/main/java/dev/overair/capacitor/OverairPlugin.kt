@@ -255,6 +255,28 @@ class OverairPlugin : Plugin() {
         )
     }
 
+    /**
+     * Serve the staged bundle NOW, reloading the webview into it.
+     *
+     * The webview reload IS the restart: on iOS an app cannot relaunch itself
+     * (calling exit reads as a crash and is rejected by review), and killing
+     * the process would drop the user on a home screen with no explanation.
+     * Reloading swaps the entire web layer in place, which is the part an
+     * over-the-air update actually replaces.
+     *
+     * `pending` is set exactly as it is on a launch-time swap, so a bundle
+     * that fails to start here is rolled back on the next launch by the same
+     * watchdog and needs no separate path.
+     */
+    @PluginMethod
+    fun applyNow(call: PluginCall) {
+        val staged = store.next ?: return call.reject("nothing staged to apply")
+        if (!File(staged.path).exists()) return call.reject("staged bundle is missing on disk")
+        store.pending = true
+        call.resolve()
+        bridge.setServerBasePath(staged.path)
+    }
+
     /** Make a downloaded bundle the one the next launch serves. */
     @PluginMethod
     fun next(call: PluginCall) {

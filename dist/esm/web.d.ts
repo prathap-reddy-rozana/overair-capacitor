@@ -17,6 +17,7 @@ export declare class OverairWeb extends WebPlugin implements OverairPlugin {
     next(_options: {
         id: string;
     }): Promise<void>;
+    applyNow(): Promise<void>;
     cancel(): Promise<void>;
     retry(): Promise<BundleInfo>;
     /** The one method that succeeds on web: an app that calls it on every

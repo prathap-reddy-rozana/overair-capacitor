@@ -167,6 +167,18 @@ export interface OverairPlugin {
   next(options: { id: string }): Promise<void>;
 
   /**
+   * Serve the staged bundle NOW, reloading the webview into it.
+   *
+   * The reload IS the restart. An iOS app cannot relaunch itself - calling
+   * exit reads as a crash and is rejected by review - and killing the process
+   * would drop the user on a home screen with no explanation. Reloading swaps
+   * the whole web layer in place, which is the part an update replaces.
+   *
+   * Nothing resolves after the reload: the page calling this is gone.
+   */
+  applyNow(): Promise<void>;
+
+  /**
    * Confirm the running bundle started.
    *
    * An app that never calls this is treated as never having booted: the next

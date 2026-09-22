@@ -15,12 +15,21 @@ export const Overair = registerPlugin<OverairPlugin>('Overair', {
 
 export interface SyncResult {
   reason: Reason;
-  /** Downloaded, verified and unpacked. It runs on the next launch. */
+  /** Downloaded, verified and unpacked. It runs on the next launch, or now
+   *  if the app calls `applyNow()`. */
   staged: boolean;
   /** Offered, but over `auto_max_bytes` and left for the app to decide. */
   deferred: Manifest | null;
   /** The server asked this device back to the build in its binary. */
   reverted: boolean;
+  /**
+   * Whatever was offered, staged or deferred.
+   *
+   * Carries `mandatory`, which decides whether the app may let someone keep
+   * working - and the version and size, which are the only things worth
+   * showing a person about an update.
+   */
+  update: Manifest | null;
 }
 
 export interface UpdaterOptions {
@@ -94,6 +103,16 @@ class Updater {
     return Overair.addListener('downloadStateChanged', listener);
   }
 
+  /**
+   * Serve the staged bundle now, reloading the webview into it.
+   *
+   * Nothing runs after this: the page that called it is replaced. Confirm
+   * with the user first, because anything unsaved on screen goes with it.
+   */
+  async applyNow(): Promise<void> {
+    await Overair.applyNow();
+  }
+
   /** Stop the download in flight. Safe when there is not one. */
   async cancel(): Promise<void> {
     await Overair.cancel();
@@ -147,7 +166,9 @@ class Updater {
   }
 
   private async run(): Promise<SyncResult> {
-    const idle: SyncResult = { reason: 'CHECKED', staged: false, deferred: null, reverted: false };
+    const idle: SyncResult = {
+      reason: 'CHECKED', staged: false, deferred: null, reverted: false, update: null,
+    };
     const identity = await Overair.identity();
     const apiUrl = this.options.apiUrl ?? identity.apiUrl;
     const apiKey = this.options.apiKey ?? identity.apiKey;
@@ -194,7 +215,9 @@ class Updater {
     if (response.revert) {
       await Overair.reset();
       await this.emit('REVERTED');
-      return { reason: response.reason, staged: false, deferred: null, reverted: true };
+      return {
+        reason: response.reason, staged: false, deferred: null, reverted: true, update: null,
+      };
     }
 
     const update = response.update;
@@ -205,7 +228,9 @@ class Updater {
     // that is actively broken is worth the megabytes.
     if (update.auto_max_bytes > 0 && update.size > update.auto_max_bytes && !update.mandatory) {
       this.log(`deferred ${update.version}: ${update.size} over ${update.auto_max_bytes}`);
-      return { reason: response.reason, staged: false, deferred: update, reverted: false };
+      return {
+        reason: response.reason, staged: false, deferred: update, reverted: false, update,
+      };
     }
 
     // Already on disk and waiting for the next launch. The server keeps
@@ -214,7 +239,9 @@ class Updater {
     // between re-downloads a bundle we already have.
     if (status.next?.id === update.bundle_id) {
       this.log(`${update.version} is already staged; not downloading again`);
-      return { reason: response.reason, staged: true, deferred: null, reverted: false };
+      return {
+        reason: response.reason, staged: true, deferred: null, reverted: false, update,
+      };
     }
 
     return this.stage(update, response.reason, identity.installId);
@@ -233,14 +260,14 @@ class Updater {
       await Overair.next({ id: update.bundle_id });
       await this.emit('APPLIED', update.bundle_id);
       this.log(`staged ${update.version}; it runs on the next launch`);
-      return { reason, staged: true, deferred: null, reverted: false };
+      return { reason, staged: true, deferred: null, reverted: false, update };
     } catch (error) {
       const message = (error as Error).message;
       this.log(`staging failed: ${message}`);
       // NOT quarantined: this is a download or disk failure, not a bundle
       // that cannot run. Refusing it forever would refuse bytes never tried.
       await this.emit('FAILED', update.bundle_id, 'stage_failed', { message, installId });
-      return { reason, staged: false, deferred: null, reverted: false };
+      return { reason, staged: false, deferred: null, reverted: false, update };
     }
   }
 

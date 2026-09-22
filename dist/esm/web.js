@@ -36,6 +36,9 @@ export class OverairWeb extends WebPlugin {
     async next(_options) {
         throw this.unavailable('Bundles are only applied on a device.');
     }
+    async applyNow() {
+        throw this.unavailable('Bundles are only applied on a device.');
+    }
     async cancel() {
         return;
     }

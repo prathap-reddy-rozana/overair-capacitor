@@ -47,6 +47,10 @@ export class OverairWeb extends WebPlugin implements OverairPlugin {
     throw this.unavailable('Bundles are only applied on a device.');
   }
 
+  async applyNow(): Promise<void> {
+    throw this.unavailable('Bundles are only applied on a device.');
+  }
+
   async cancel(): Promise<void> {
     return;
   }
