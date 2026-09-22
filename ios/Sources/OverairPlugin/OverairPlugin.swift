@@ -281,12 +281,8 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
         }
         store.pending = true
         call.resolve()
-        // Capacitor runs plugin methods off the main queue, and this touches
-        // the webview. Called on the background queue it does nothing at all -
-        // the call resolves, the app reports APPLIED, and the page never
-        // changes. `load()` works only because it is already on main.
         DispatchQueue.main.async { [weak self] in
-            self?.bridge?.setServerBasePath(staged.path)
+            self?.serve(staged.path)
         }
     }
 
@@ -354,11 +350,7 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
         let target = store.active
         call.resolve(["rolledBackTo": target?.version ?? "embedded"])
         DispatchQueue.main.async { [weak self] in
-            if let target {
-                self?.bridge?.setServerBasePath(target.path)
-            } else if let embedded = Bundle.main.url(forResource: "public", withExtension: nil) {
-                self?.bridge?.setServerBasePath(embedded.path)
-            }
+            self?.serve(target?.path ?? Self.embeddedPath())
         }
     }
 
@@ -368,10 +360,8 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
         call.resolve()
         // Mid-session, the webview IS serving a bundle, so going back needs an
         // explicit path to the assets in the binary - "" would serve nothing.
-        DispatchQueue.main.async {
-            if let embedded = Bundle.main.url(forResource: "public", withExtension: nil) {
-                self.bridge?.setServerBasePath(embedded.path)
-            }
+        DispatchQueue.main.async { [weak self] in
+            self?.serve(Self.embeddedPath())
         }
     }
 
@@ -382,6 +372,30 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
         if let previous = store.previous { keep.insert(previous.id) }
         bundles.prune(keep: keep)
         call.resolve()
+    }
+
+    /**
+     * Point the webview at a directory and actually load it.
+     *
+     * iOS and Android differ here and the difference is silent. Android's
+     * `setServerBasePath` posts a `loadUrl` of its own; the iOS one only
+     * repoints the asset handler (CapacitorBridge.swift) and returns, so
+     * without the reload the path changes and the page does not. Every
+     * launch-time swap hid this, because `load()` runs before the webview has
+     * loaded anything at all.
+     *
+     * Main thread only: Capacitor runs plugin methods off it, and a webview
+     * touched from the background queue does nothing and says nothing.
+     */
+    private func serve(_ path: String) {
+        guard !path.isEmpty else { return }
+        bridge?.setServerBasePath(path)
+        bridge?.webView?.reload()
+    }
+
+    /// The build compiled into the binary.
+    private static func embeddedPath() -> String {
+        Bundle.main.url(forResource: "public", withExtension: nil)?.path ?? ""
     }
 
     private func describe(_ record: BundleRecord) -> [String: Any] {
