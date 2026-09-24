@@ -27,6 +27,10 @@ export class OverairWeb extends WebPlugin implements OverairPlugin {
     return { id: '', state: 'IDLE', bytes: 0, total: 0, fraction: -1, failure: null };
   }
 
+  async acknowledgeRollback(): Promise<void> {
+    return;
+  }
+
   async identity(): Promise<OverairIdentity> {
     return {
       installId: 'web',

@@ -62,6 +62,17 @@ index.html time is when that web code was built. Point it at your own `webDir`.
 Left empty, the server offers as it always has, including a release older than
 the binary's own code. Checks it holds come back as `HELD_OLDER_THAN_EMBEDDED`.
 
+## Packaging a bundle
+
+Zip the CONTENTS of your web build folder, so `index.html` is at the top of the
+archive. Zipping the folder itself (Finder's Compress does) puts it one level
+down, and the app would open a blank page; the platform refuses such an upload
+and the plugin refuses to install one.
+
+```bash
+cd www && zip -qr ../bundle.zip . -x '.*' '__MACOSX/*'
+```
+
 ## Use
 
 ```ts

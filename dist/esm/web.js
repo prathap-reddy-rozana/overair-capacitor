@@ -19,6 +19,9 @@ export class OverairWeb extends WebPlugin {
     idle() {
         return { id: '', state: 'IDLE', bytes: 0, total: 0, fraction: -1, failure: null };
     }
+    async acknowledgeRollback() {
+        return;
+    }
     async identity() {
         return {
             installId: 'web',
