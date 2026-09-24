@@ -71,6 +71,8 @@ function shouldDefer(update, acceptedId) {
 /** How many pre-endpoint events to hold. One launch raises at most a couple;
  *  the cap only matters for a build that never syncs at all. */
 const QUEUED_EVENT_LIMIT = 20;
+/** Longest failure message reported; keeps an event under the server's cap. */
+const MAX_MESSAGE = 1000;
 /**
  * The protocol half of the SDK.
  *
@@ -166,8 +168,10 @@ class Updater {
      * something has to be able to say yes. Without this the deferred manifest
      * is a fact the app can display and nothing more.
      *
-     * The install id is re-read rather than remembered: a deferred update can
-     * sit on screen for as long as the user leaves it there.
+     * A fresh check comes first, for the reason `retry` gives: the deferred
+     * manifest's URL is presigned and can expire while the card sits on screen.
+     * The server may also have paused the release or moved on since; its
+     * current answer wins, and only offline does the held link get used.
      */
     async accept(update) {
         const manifest = update ?? this.deferred;
@@ -178,11 +182,17 @@ class Updater {
         // a handset when nothing had.
         if (this.accepting)
             return this.accepting;
-        // Remembered BEFORE staging, so a download that fails can still be
-        // retried: `retry` re-checks, and the ceiling would otherwise defer the
-        // very bundle this call was agreeing to.
+        // Remembered BEFORE the check, so the ceiling does not defer the very
+        // bundle this call is agreeing to (and `retry` can take it later).
         this.acceptedId = manifest.bundle_id;
         this.accepting = (async () => {
+            // A check already running started before the consent; its answer is
+            // "deferred", so wait it out and ask again.
+            if (this.inFlight)
+                await this.inFlight.catch(() => undefined);
+            const fresh = await this.sync();
+            if (fresh.reason !== 'CHECKED')
+                return fresh;
             const identity = await Overair.identity();
             return this.stage(manifest, 'OFFERED', identity.installId);
         })().finally(() => { this.accepting = null; });
@@ -330,7 +340,8 @@ class Updater {
             this.log(`staging failed: ${message}`);
             // NOT quarantined: this is a download or disk failure, not a bundle
             // that cannot run. Refusing it forever would refuse bytes never tried.
-            await this.emit('FAILED', update.bundle_id, 'stage_failed', { message, installId });
+            // Capped: the server refuses an event whose detail is over 4 KB.
+            await this.emit('FAILED', update.bundle_id, 'stage_failed', { message: message.slice(0, MAX_MESSAGE), installId });
             return { reason, staged: false, deferred: null, reverted: false, update };
         }
     }

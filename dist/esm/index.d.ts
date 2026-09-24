@@ -136,8 +136,10 @@ declare class Updater {
      * something has to be able to say yes. Without this the deferred manifest
      * is a fact the app can display and nothing more.
      *
-     * The install id is re-read rather than remembered: a deferred update can
-     * sit on screen for as long as the user leaves it there.
+     * A fresh check comes first, for the reason `retry` gives: the deferred
+     * manifest's URL is presigned and can expire while the card sits on screen.
+     * The server may also have paused the release or moved on since; its
+     * current answer wins, and only offline does the held link get used.
      */
     accept(update?: Manifest): Promise<SyncResult>;
     /**

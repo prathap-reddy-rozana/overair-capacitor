@@ -7,7 +7,7 @@
  */
 export type Platform = 'android' | 'ios' | 'web';
 /** Every outcome the server can report, including every refusal. */
-export type Reason = 'CHECKED' | 'OFFERED' | 'UP_TO_DATE' | 'CONFIG_ERROR' | 'HELD_RUNTIME' | 'HELD_TARGETING' | 'HELD_ROLLOUT' | 'HELD_QUARANTINE' | 'HELD_CHANNEL' | 'DOWNLOAD_STARTED' | 'DOWNLOADED' | 'APPLIED' | 'READY' | 'FAILED' | 'REVERTED' | 'REVERT_TO_EMBEDDED';
+export type Reason = 'CHECKED' | 'OFFERED' | 'UP_TO_DATE' | 'CONFIG_ERROR' | 'HELD_RUNTIME' | 'HELD_TARGETING' | 'HELD_ROLLOUT' | 'HELD_QUARANTINE' | 'HELD_CHANNEL' | 'HELD_PAUSED' | 'HELD_BLOCKED' | 'DOWNLOAD_STARTED' | 'DOWNLOADED' | 'APPLIED' | 'READY' | 'FAILED' | 'REVERTED' | 'REVERT_TO_EMBEDDED';
 export interface CheckRequest {
     install_id: string;
     platform: Platform;
