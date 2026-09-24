@@ -136,6 +136,10 @@ export interface OverairPlugin {
    *  download got to. */
   status(): Promise<OverairStatus>;
 
+  /** Clear `rolledBack` once it has been reported. `status()` leaves it set,
+   *  so whichever reader sees it first can report it. */
+  acknowledgeRollback(): Promise<void>;
+
   /** Identity and configuration, from native config. */
   identity(): Promise<OverairIdentity>;
 

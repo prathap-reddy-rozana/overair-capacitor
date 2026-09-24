@@ -104,6 +104,8 @@ class Updater {
      * `pause_below_ready_bps` was reading exactly that number.
      */
     queued = [];
+    /** The rollback already sent, so notifyReady and sync never both send it. */
+    rollbackReported = null;
     /** Its OWN guard, not `inFlight`. Joining a check would resolve with that
      *  check's answer - deferred - and the tap would look like it did nothing. */
     accepting = null;
@@ -131,8 +133,30 @@ class Updater {
     async notifyReady() {
         await Overair.notifyReady();
         const status = await Overair.status();
+        await this.reportRollback(status);
         if (status.current)
             await this.emit('READY', status.current.id);
+    }
+    /**
+     * A rollback happens natively, before any JavaScript exists to see it.
+     * Acknowledged only once the server has the report: cleared on a queued
+     * one, an offline first launch lost it for good. Until then it stays set,
+     * so the next sync, or the next launch, sends it again.
+     */
+    async reportRollback(status) {
+        const id = status.rolledBack ? status.rolledBackId : null;
+        if (!id || id === this.rollbackReported || !this.api)
+            return;
+        this.log(`rolled back ${id} before boot`);
+        if (!(await this.emit('FAILED', id, 'boot_failed')))
+            return;
+        this.rollbackReported = id;
+        try {
+            await Overair.acknowledgeRollback();
+        }
+        catch {
+            // Never why an app fails to start; the guard above stops a resend.
+        }
     }
     /** What the webview is serving, or null on the build in the binary. */
     async current() {
@@ -239,7 +263,9 @@ class Updater {
         const result = await Overair.rollback();
         if (status.current)
             await this.emit('FAILED', status.current.id, 'app_reported');
-        await this.emit('REVERTED', status.previous?.id);
+        // No bundle: the server quarantines the bundle an event names, and the
+        // previous one is where this device is going, not what failed.
+        await this.emit('REVERTED');
         return result;
     }
     /** Back to the build compiled into the binary, forgetting the rest. */
@@ -261,14 +287,7 @@ class Updater {
         this.api = new DeliveryApi(apiUrl, apiKey);
         await this.flushQueued();
         const status = await Overair.status();
-        // A rollback happens natively, before any JavaScript exists to see it.
-        // This is the first moment it can be reported, and reporting it is the
-        // difference between a console that shows a failed release and one that
-        // shows a release nobody ever took.
-        if (status.rolledBack && status.rolledBackId) {
-            this.log(`rolled back ${status.rolledBackId} before boot`);
-            await this.emit('FAILED', status.rolledBackId, 'boot_failed');
-        }
+        await this.reportRollback(status);
         let response;
         try {
             response = await this.api.check({
@@ -344,15 +363,39 @@ class Updater {
         catch (error) {
             const message = error.message;
             this.log(`staging failed: ${message}`);
-            // NOT quarantined: this is a download or disk failure, not a bundle
-            // that cannot run. Refusing it forever would refuse bytes never tried.
-            // Capped: the server refuses an event whose detail is over 4 KB.
-            await this.emit('FAILED', update.bundle_id, 'stage_failed', { message: message.slice(0, MAX_MESSAGE), installId });
+            const detail = { message: message.slice(0, MAX_MESSAGE), installId };
+            if (await this.unusable(update.bundle_id)) {
+                // The same URL gives the same bytes: a digest mismatch or an archive
+                // that cannot run here. Refused on this device and on the server.
+                try {
+                    await Overair.quarantine({ id: update.bundle_id });
+                }
+                catch {
+                    // The server's quarantine still stops the offer.
+                }
+                await this.emit('FAILED', update.bundle_id, 'bad_bundle', detail);
+            }
+            else {
+                // NOT quarantined: a download or disk failure, not a bundle that
+                // cannot run. Refusing it forever would refuse bytes never tried.
+                // Capped: the server refuses an event whose detail is over 4 KB.
+                await this.emit('FAILED', update.bundle_id, 'stage_failed', detail);
+            }
             return { reason, staged: false, deferred: null, reverted: false, update };
+        }
+    }
+    async unusable(id) {
+        try {
+            const { failure } = (await Overair.status()).download;
+            return failure?.id === id && (failure.code === 'unpack' || failure.code === 'digest');
+        }
+        catch {
+            return false;
         }
     }
     /** Telemetry never makes a device wait, and a failed report must never
      *  fail the update it was describing. */
+    /** True once the server has the event; false when held or dropped. */
     async emit(type, bundle, errorCode, detail) {
         try {
             const { installId } = await Overair.identity();
@@ -368,13 +411,15 @@ class Updater {
                 // never syncs and this would otherwise grow for the life of the app.
                 if (this.queued.length < QUEUED_EVENT_LIMIT)
                     this.queued.push(event);
-                return;
+                return false;
             }
             await this.api.report([event]);
+            return true;
         }
         catch {
             // Dropped on purpose. The console being blind for one event is a
             // smaller problem than an update failing because reporting did.
+            return false;
         }
     }
     /** Send whatever was raised before the endpoint was known. Same bargain as
@@ -419,6 +464,9 @@ class OverairWeb extends core.WebPlugin {
     }
     idle() {
         return { id: '', state: 'IDLE', bytes: 0, total: 0, fraction: -1, failure: null };
+    }
+    async acknowledgeRollback() {
+        return;
     }
     async identity() {
         return {

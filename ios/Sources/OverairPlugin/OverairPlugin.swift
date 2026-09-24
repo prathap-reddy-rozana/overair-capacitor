@@ -15,6 +15,7 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
     public let jsName = "Overair"
     public let pluginMethods: [CAPPluginMethod] = [
         CAPPluginMethod(name: "status", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "acknowledgeRollback", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "identity", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "download", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "cancel", returnType: CAPPluginReturnPromise),
@@ -110,10 +111,14 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
         result["current"] = store.active.map(describe) as Any
         result["next"] = store.next.map(describe) as Any
         result["previous"] = store.previous.map(describe) as Any
-        // Reported once. A rollback is news exactly one time; after that it
-        // is just the state the device is in.
-        store.rolledBackId = nil
+        // Kept until acknowledged. Cleared here, the first reader - notifyReady,
+        // which runs before sync - swallowed it and no rollback was ever reported.
         call.resolve(result)
+    }
+
+    @objc func acknowledgeRollback(_ call: CAPPluginCall) {
+        store.rolledBackId = nil
+        call.resolve()
     }
 
     @objc func identity(_ call: CAPPluginCall) {
@@ -206,9 +211,9 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
                     "id": pending.id,
                     "code": Self.code(for: error),
                     "message": error.localizedDescription,
-                    // A digest mismatch is deterministic: the same URL will
-                    // produce the same wrong bytes.
-                    "retryable": !wasCancelled && Self.code(for: error) != "digest",
+                    // A digest mismatch or an unusable archive is deterministic:
+                    // the same URL will produce the same bytes. Matches Android.
+                    "retryable": !wasCancelled && !["digest", "unpack"].contains(Self.code(for: error)),
                 ]
                 emit(state: wasCancelled ? "CANCELLED" : "FAILED", id: pending.id)
                 call.reject(error.localizedDescription, nil, error)
@@ -226,7 +231,7 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
             switch failure {
             case .cancelled: return "cancelled"
             case .digest: return "digest"
-            case .unsafeEntry: return "unpack"
+            case .unsafeEntry, .noEntryPoint: return "unpack"
             case .http: return "http"
             }
         }

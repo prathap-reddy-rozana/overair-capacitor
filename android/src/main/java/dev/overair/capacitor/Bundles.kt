@@ -65,6 +65,11 @@ class Bundles(private val root: File) {
             target.deleteRecursively()
             target.mkdirs()
             val size = unzip(archive, target, cancelled)
+            // The web root is the top of the archive. A zipped www folder puts
+            // index.html one level down and opens to "Webpage not available".
+            if (!File(target, "index.html").isFile) {
+                throw VerifyError("no index.html at the top of the bundle; zip the folder's contents, not the folder")
+            }
             return target to size
         } catch (error: Throwable) {
             target.deleteRecursively()

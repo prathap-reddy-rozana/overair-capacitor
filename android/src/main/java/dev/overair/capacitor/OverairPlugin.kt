@@ -122,10 +122,15 @@ class OverairPlugin : Plugin() {
             .put("rolledBack", store.rolledBackId != null)
             .put("rolledBackId", store.rolledBackId ?: JSObject.NULL)
             .put("download", downloadStatus())
-        // Reported once. A rollback is news exactly one time; after that it
-        // is just the state the device is in.
-        store.rolledBackId = null
+        // Kept until acknowledged. Cleared here, the first reader - notifyReady,
+        // which runs before sync - swallowed it and no rollback was ever reported.
         call.resolve(result)
+    }
+
+    @PluginMethod
+    fun acknowledgeRollback(call: PluginCall) {
+        store.rolledBackId = null
+        call.resolve()
     }
 
     @PluginMethod

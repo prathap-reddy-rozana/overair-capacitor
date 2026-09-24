@@ -12,6 +12,7 @@ import type { BundleInfo, DownloadOptions, OverairIdentity, OverairPlugin, Overa
 export declare class OverairWeb extends WebPlugin implements OverairPlugin {
     status(): Promise<OverairStatus>;
     private idle;
+    acknowledgeRollback(): Promise<void>;
     identity(): Promise<OverairIdentity>;
     download(_options: DownloadOptions): Promise<BundleInfo>;
     next(_options: {

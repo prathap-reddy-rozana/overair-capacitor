@@ -17,6 +17,7 @@ public final class Bundles: NSObject {
         case http(Int)
         case digest(expected: String, got: String)
         case unsafeEntry(String)
+        case noEntryPoint
         case cancelled
 
         public var errorDescription: String? {
@@ -27,6 +28,8 @@ public final class Bundles: NSObject {
                 return "digest mismatch: expected \(expected), got \(got)"
             case .unsafeEntry(let name):
                 return "refusing archive entry outside the bundle: \(name)"
+            case .noEntryPoint:
+                return "no index.html at the top of the bundle; zip the folder's contents, not the folder"
             case .cancelled:
                 return "cancelled"
             }
@@ -89,6 +92,14 @@ public final class Bundles: NSObject {
             try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
             try FileManager.default.unzipItem(at: temporary, to: target)
             try rejectEscapes(in: target)
+            // The web root is the top of the archive. A zipped www folder puts
+            // index.html one level down and opens to a blank page.
+            var isDirectory: ObjCBool = false
+            let entry = target.appendingPathComponent("index.html").path
+            guard FileManager.default.fileExists(atPath: entry, isDirectory: &isDirectory),
+                  !isDirectory.boolValue else {
+                throw Failure.noEntryPoint
+            }
             return (target, try size(of: target))
         } catch {
             try? FileManager.default.removeItem(at: target)

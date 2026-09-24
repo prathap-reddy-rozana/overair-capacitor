@@ -94,6 +94,8 @@ declare class Updater {
      * `pause_below_ready_bps` was reading exactly that number.
      */
     private queued;
+    /** The rollback already sent, so notifyReady and sync never both send it. */
+    private rollbackReported;
     /** Its OWN guard, not `inFlight`. Joining a check would resolve with that
      *  check's answer - deferred - and the tap would look like it did nothing. */
     private accepting;
@@ -113,6 +115,13 @@ declare class Updater {
      * actually works, not that a file parsed.
      */
     notifyReady(): Promise<void>;
+    /**
+     * A rollback happens natively, before any JavaScript exists to see it.
+     * Acknowledged only once the server has the report: cleared on a queued
+     * one, an offline first launch lost it for good. Until then it stays set,
+     * so the next sync, or the next launch, sends it again.
+     */
+    private reportRollback;
     /** What the webview is serving, or null on the build in the binary. */
     current(): Promise<import("./definitions").BundleInfo | null>;
     /**
@@ -178,8 +187,10 @@ declare class Updater {
     reset(): Promise<void>;
     private run;
     private stage;
+    private unusable;
     /** Telemetry never makes a device wait, and a failed report must never
      *  fail the update it was describing. */
+    /** True once the server has the event; false when held or dropped. */
     private emit;
     /** Send whatever was raised before the endpoint was known. Same bargain as
      *  `emit`: reporting must never be why an update fails. */
