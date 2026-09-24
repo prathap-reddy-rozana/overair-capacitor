@@ -58,10 +58,16 @@ export interface UpdaterOptions {
      * keeps whatever the binary was built with.
      */
     runtime?: string;
+    /** Override when this build's web code was built (ISO 8601). For correcting
+     *  a shipped build stamped wrongly; empty keeps capacitor.config's. */
+    embeddedAt?: string;
     attrs?: Record<string, unknown>;
     customId?: string;
     debug?: boolean;
 }
+/** A time the server can read, or null. Anything else is dropped here rather
+ *  than sent: the value is baked into the binary. */
+export declare function embeddedTime(value: string | undefined): string | null;
 /**
  * The protocol half of the SDK.
  *

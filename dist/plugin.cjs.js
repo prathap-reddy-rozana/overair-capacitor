@@ -68,6 +68,11 @@ function shouldDefer(update, acceptedId) {
         return false;
     return update.auto_max_bytes > 0 && update.size > update.auto_max_bytes;
 }
+/** A time the server can read, or null. Anything else is dropped here rather
+ *  than sent: the value is baked into the binary. */
+function embeddedTime(value) {
+    return value && !Number.isNaN(Date.parse(value)) ? value : null;
+}
 /** How many pre-endpoint events to hold. One launch raises at most a couple;
  *  the cap only matters for a build that never syncs at all. */
 const QUEUED_EVENT_LIMIT = 20;
@@ -278,6 +283,7 @@ class Updater {
                 custom_id: this.options.customId ?? '',
                 attrs: this.options.attrs ?? {},
                 current_bundle: status.current?.id ?? '',
+                embedded_at: embeddedTime(this.options.embeddedAt || identity.embeddedAt),
                 quarantined: status.quarantined,
             });
         }
@@ -420,6 +426,7 @@ class OverairWeb extends core.WebPlugin {
             channel: '',
             runtime: '',
             nativeBuild: '',
+            embeddedAt: '',
             appVersion: '',
             apiUrl: '',
             apiKey: '',
@@ -466,5 +473,6 @@ var web = /*#__PURE__*/Object.freeze({
 
 exports.Overair = Overair;
 exports.OverairUpdater = OverairUpdater;
+exports.embeddedTime = embeddedTime;
 exports.shouldDefer = shouldDefer;
 //# sourceMappingURL=plugin.cjs.js.map

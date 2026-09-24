@@ -95,6 +95,10 @@ export interface OverairIdentity {
     runtime: string;
     /** The native build number. A change means a store update landed. */
     nativeBuild: string;
+    /** When the web code built into this binary was built (ISO 8601), from
+     *  `embeddedAt` in capacitor.config. Nothing uploaded before it is offered,
+     *  so a fresh install is never moved back. Empty when not set. */
+    embeddedAt: string;
     appVersion: string;
     /** Set from `capacitor.config.ts`, so the app need not pass them. */
     apiUrl: string;

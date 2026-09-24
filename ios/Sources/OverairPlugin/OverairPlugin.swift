@@ -126,6 +126,7 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
             "runtime": getConfig().getString("runtime", "") ?? "",
             "apiUrl": getConfig().getString("apiUrl", "") ?? "",
             "apiKey": getConfig().getString("apiKey", "") ?? "",
+            "embeddedAt": getConfig().getString("embeddedAt", "") ?? "",
             "nativeBuild": Self.nativeBuild(),
             "appVersion": info?["CFBundleShortVersionString"] as? String ?? "",
         ])

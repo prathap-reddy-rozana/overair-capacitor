@@ -13,6 +13,7 @@ export type Reason =
   | 'CHECKED' | 'OFFERED' | 'UP_TO_DATE' | 'CONFIG_ERROR'
   | 'HELD_RUNTIME' | 'HELD_TARGETING' | 'HELD_ROLLOUT'
   | 'HELD_QUARANTINE' | 'HELD_CHANNEL' | 'HELD_PAUSED' | 'HELD_BLOCKED'
+  | 'HELD_OLDER_THAN_EMBEDDED'
   | 'DOWNLOAD_STARTED' | 'DOWNLOADED' | 'APPLIED' | 'READY'
   | 'FAILED' | 'REVERTED' | 'REVERT_TO_EMBEDDED';
 
@@ -28,6 +29,8 @@ export interface CheckRequest {
   custom_id?: string;
   attrs?: Record<string, unknown>;
   current_bundle?: string;
+  /** When the binary's own web code was built. Older uploads are not offered. */
+  embedded_at?: string | null;
   /** Bundles this device already refused. It knows, so it says. */
   quarantined?: string[];
 }

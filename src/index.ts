@@ -72,9 +72,18 @@ export interface UpdaterOptions {
    * keeps whatever the binary was built with.
    */
   runtime?: string;
+  /** Override when this build's web code was built (ISO 8601). For correcting
+   *  a shipped build stamped wrongly; empty keeps capacitor.config's. */
+  embeddedAt?: string;
   attrs?: Record<string, unknown>;
   customId?: string;
   debug?: boolean;
+}
+
+/** A time the server can read, or null. Anything else is dropped here rather
+ *  than sent: the value is baked into the binary. */
+export function embeddedTime(value: string | undefined): string | null {
+  return value && !Number.isNaN(Date.parse(value)) ? value : null;
 }
 
 /** How many pre-endpoint events to hold. One launch raises at most a couple;
@@ -297,6 +306,7 @@ class Updater {
         custom_id: this.options.customId ?? '',
         attrs: this.options.attrs ?? {},
         current_bundle: status.current?.id ?? '',
+        embedded_at: embeddedTime(this.options.embeddedAt || identity.embeddedAt),
         quarantined: status.quarantined,
       });
     } catch (error) {
