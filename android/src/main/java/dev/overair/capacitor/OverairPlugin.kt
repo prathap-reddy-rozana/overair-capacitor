@@ -140,6 +140,7 @@ class OverairPlugin : Plugin() {
                 .put("runtime", config.getString("runtime", "") ?: "")
                 .put("apiUrl", config.getString("apiUrl", "") ?: "")
                 .put("apiKey", config.getString("apiKey", "") ?: "")
+                .put("embeddedAt", config.getString("embeddedAt", "") ?: "")
                 .put("nativeBuild", nativeBuild())
                 .put("appVersion", info.versionName ?: ""),
         )

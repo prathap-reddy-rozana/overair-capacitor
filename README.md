@@ -39,6 +39,8 @@ your app code: this file is compiled into the binary and an update cannot
 rewrite it.
 
 ```ts
+import { statSync } from 'node:fs';
+
 const config: CapacitorConfig = {
   plugins: {
     Overair: {
@@ -46,10 +48,19 @@ const config: CapacitorConfig = {
       apiKey: 'oa_client_...',   // a client key is public by design
       channel: 'production',     // what this binary subscribes to, forever
       runtime: 'fp_a91c4e2d1fb', // this native build's fingerprint
+      // When the web code copied into this binary was built. Nothing uploaded
+      // before it is offered, so a fresh install is never moved backwards.
+      embeddedAt: statSync('www/index.html', { throwIfNoEntry: false })
+        ?.mtime.toISOString() ?? '',
     },
   },
 };
 ```
+
+`embeddedAt` is read when `cap sync` copies `www` into the native project, so the
+index.html time is when that web code was built. Point it at your own `webDir`.
+Left empty, the server offers as it always has, including a release older than
+the binary's own code. Checks it holds come back as `HELD_OLDER_THAN_EMBEDDED`.
 
 ## Use
 
@@ -124,6 +135,11 @@ await OverairUpdater.sync({ runtime: remoteConfig.runtime });
 The first cannot be wrong about which binary it is talking to. The second is
 simpler and is fine where the people editing the config are the people
 shipping the builds — just know that it carries the risk above.
+
+`embeddedAt` can be overridden the same way, for a shipped build stamped wrongly:
+built from older code than its time says, it is held back from releases it
+should get. Target the override at that build (a Remote Config condition on the
+build number), not every build. A value that is not a time is sent as null.
 
 ## Progress, cancel, retry
 

@@ -33,6 +33,7 @@ export class OverairWeb extends WebPlugin implements OverairPlugin {
       channel: '',
       runtime: '',
       nativeBuild: '',
+      embeddedAt: '',
       appVersion: '',
       apiUrl: '',
       apiKey: '',
