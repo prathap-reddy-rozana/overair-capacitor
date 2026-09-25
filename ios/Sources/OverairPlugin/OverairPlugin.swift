@@ -1,5 +1,6 @@
 import Capacitor
 import Foundation
+import UIKit
 
 /// Over-the-air updates for Capacitor.
 ///
@@ -54,6 +55,13 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     override public func load() {
+        // Back from the background. Announced, not acted on: the SDK decides
+        // whether a check is due. Not didBecomeActive, which a permission
+        // alert closing also fires.
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(enteredForeground),
+            name: UIApplication.willEnterForegroundNotification, object: nil)
+
         let decision = Boot.decide(
             BootFacts(
                 nativeBuild: Self.nativeBuild(),
@@ -114,6 +122,10 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
         // Kept until acknowledged. Cleared here, the first reader - notifyReady,
         // which runs before sync - swallowed it and no rollback was ever reported.
         call.resolve(result)
+    }
+
+    @objc private func enteredForeground() {
+        notifyListeners("resume", data: [:])
     }
 
     @objc func acknowledgeRollback(_ call: CAPPluginCall) {

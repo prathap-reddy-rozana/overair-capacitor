@@ -91,10 +91,14 @@ describe('accept() re-checks before downloading a deferred update', () => {
     serve(offer('https://s3.test/held'), null);
     const { OverairUpdater } = await import('./index');
     await OverairUpdater.sync(OPTIONS);
+    const heard: boolean[] = [];
+    OverairUpdater.onResult((r) => heard.push(r.staged));
 
     const result = await OverairUpdater.accept();
 
     expect(result.staged).toBe(true);
     expect(native.download.mock.calls[0][0].url).toBe('https://s3.test/held');
+    // The inner check's "no answer", then the staged result - not just the first.
+    expect(heard).toEqual([false, true]);
   });
 });

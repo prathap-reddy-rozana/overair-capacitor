@@ -46,6 +46,25 @@ class OverairPlugin : Plugin() {
         val checksum: String,
     )
 
+    /** Set when the app is really backgrounded. A permission dialog pauses
+     *  and resumes the activity without stopping it, and is not a return. */
+    private var stopped = false
+
+    override fun handleOnStop() {
+        super.handleOnStop()
+        stopped = true
+    }
+
+    // Back in the foreground. Announced, not acted on: the SDK decides whether
+    // a check is due. Unlike iOS, returning from another app we opened (camera,
+    // a picker) counts, since ours really was in the background.
+    override fun handleOnResume() {
+        super.handleOnResume()
+        if (!stopped) return
+        stopped = false
+        notifyListeners("resume", JSObject())
+    }
+
     override fun load() {
         val context: Context = context
         store = Store(context)

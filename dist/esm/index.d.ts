@@ -61,6 +61,11 @@ export interface UpdaterOptions {
     /** Override when this build's web code was built (ISO 8601). For correcting
      *  a shipped build stamped wrongly; empty keeps capacitor.config's. */
     embeddedAt?: string;
+    /** Check again when the app comes back to the foreground. On unless set
+     *  false: an app left open for days otherwise never hears of an update. */
+    checkOnResume?: boolean;
+    /** No resume check sooner than this after the last one answered. */
+    resumeGapMinutes?: number;
     attrs?: Record<string, unknown>;
     customId?: string;
     debug?: boolean;
@@ -96,6 +101,11 @@ declare class Updater {
     private queued;
     /** The rollback already sent, so notifyReady and sync never both send it. */
     private rollbackReported;
+    /** Every sync's answer goes here, whoever asked - the app, or a resume. */
+    private listeners;
+    private resumeListener;
+    /** When a resume may check again. */
+    private resumeAt;
     /** Its OWN guard, not `inFlight`. Joining a check would resolve with that
      *  check's answer - deferred - and the tap would look like it did nothing. */
     private accepting;
@@ -106,6 +116,16 @@ declare class Updater {
      * one is running joins the first rather than starting a second download.
      */
     sync(options?: UpdaterOptions): Promise<SyncResult>;
+    /** Change options without checking - e.g. switching resume checks off
+     *  from remote config. */
+    configure(options: UpdaterOptions): void;
+    /** Every sync's result, whoever started it - resume checks find updates too.
+     *  Returns a function that unsubscribes. */
+    onResult(listener: (result: SyncResult) => void): () => void;
+    private answered;
+    /** Once, from the first sync: before that there are no options to check with. */
+    private listenForResume;
+    private resumed;
     /**
      * Tell the platform this bundle started.
      *
