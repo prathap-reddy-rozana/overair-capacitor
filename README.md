@@ -101,6 +101,16 @@ result.update     // the manifest: version, size, and `mandatory`
 result.reason     // why, including every refusal
 ```
 
+**It checks again on its own when the app returns to the foreground**, at
+most every `resumeGapMinutes` (default 5) and never over a download in
+progress. Turn it off with `checkOnResume: false`, or later with
+`configure({ checkOnResume: false })`. Those checks find updates too, so read
+results with `onResult` rather than only from your own `sync()` calls:
+
+```ts
+const stop = OverairUpdater.onResult((result) => showUpdateCard(result));
+```
+
 **A deferred update needs `accept()`.** `auto_max_bytes` is the server saying
 ASK, not refuse: anything over it is left alone so a 20 MB bundle does not
 land on somebody's data plan unannounced. Show the version and size, and call

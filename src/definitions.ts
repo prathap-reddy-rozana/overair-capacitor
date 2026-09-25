@@ -232,5 +232,9 @@ export interface OverairPlugin {
     listener: (status: DownloadStatus) => void,
   ): Promise<PluginListenerHandle>;
 
+  /** The app came back to the foreground. The SDK decides whether a check
+   *  is due; the app need not listen. */
+  addListener(eventName: 'resume', listener: () => void): Promise<PluginListenerHandle>;
+
   removeAllListeners(): Promise<void>;
 }

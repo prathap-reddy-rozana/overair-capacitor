@@ -77,6 +77,11 @@ export interface UpdaterOptions {
   /** Override when this build's web code was built (ISO 8601). For correcting
    *  a shipped build stamped wrongly; empty keeps capacitor.config's. */
   embeddedAt?: string;
+  /** Check again when the app comes back to the foreground. On unless set
+   *  false: an app left open for days otherwise never hears of an update. */
+  checkOnResume?: boolean;
+  /** No resume check sooner than this after the last one answered. */
+  resumeGapMinutes?: number;
   attrs?: Record<string, unknown>;
   customId?: string;
   debug?: boolean;
@@ -87,6 +92,14 @@ export interface UpdaterOptions {
 export function embeddedTime(value: string | undefined): string | null {
   return value && !Number.isNaN(Date.parse(value)) ? value : null;
 }
+
+const NO_ANSWER: SyncResult = {
+  reason: 'CHECKED', staged: false, deferred: null, reverted: false, update: null,
+};
+const DEFAULT_RESUME_GAP_MINUTES = 5;
+/** After a check that got no answer, the next resume may ask this soon. */
+const RESUME_RETRY_MS = 60_000;
+const MOVING = ['DOWNLOADING', 'VERIFYING', 'UNPACKING'];
 
 /** How many pre-endpoint events to hold. One launch raises at most a couple;
  *  the cap only matters for a build that never syncs at all. */
@@ -123,6 +136,11 @@ class Updater {
   private queued: DeviceEvent[] = [];
   /** The rollback already sent, so notifyReady and sync never both send it. */
   private rollbackReported: string | null = null;
+  /** Every sync's answer goes here, whoever asked - the app, or a resume. */
+  private listeners = new Set<(result: SyncResult) => void>();
+  private resumeListener: Promise<unknown> | null = null;
+  /** When a resume may check again. */
+  private resumeAt = 0;
   /** Its OWN guard, not `inFlight`. Joining a check would resolve with that
    *  check's answer - deferred - and the tap would look like it did nothing. */
   private accepting: Promise<SyncResult> | null = null;
@@ -135,9 +153,72 @@ class Updater {
    */
   async sync(options: UpdaterOptions = {}): Promise<SyncResult> {
     this.options = { ...this.options, ...options };
+    this.listenForResume();
     if (this.inFlight) return this.inFlight;
-    this.inFlight = this.run().finally(() => { this.inFlight = null; });
+    this.inFlight = this.run()
+      .then((result) => this.answered(result), (error: unknown) => {
+        // Failed before it could ask: no answer, so the same one-minute wait.
+        this.answered({ ...NO_ANSWER });
+        throw error;
+      })
+      .finally(() => { this.inFlight = null; });
     return this.inFlight;
+  }
+
+  /** Change options without checking - e.g. switching resume checks off
+   *  from remote config. */
+  configure(options: UpdaterOptions): void {
+    this.options = { ...this.options, ...options };
+  }
+
+  /** Every sync's result, whoever started it - resume checks find updates too.
+   *  Returns a function that unsubscribes. */
+  onResult(listener: (result: SyncResult) => void): () => void {
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
+  }
+
+  private answered(result: SyncResult): SyncResult {
+    // CHECKED is the answer to a check that got none (offline, no endpoint).
+    const gap = this.options.resumeGapMinutes ?? DEFAULT_RESUME_GAP_MINUTES;
+    this.resumeAt = Date.now() + (result.reason === 'CHECKED' ? RESUME_RETRY_MS : gap * 60_000);
+    for (const listener of this.listeners) {
+      try {
+        listener(result);
+      } catch {
+        // One listener's bug is not every other listener's problem.
+      }
+    }
+    return result;
+  }
+
+  /** Once, from the first sync: before that there are no options to check with. */
+  private listenForResume(): void {
+    if (this.resumeListener) return;
+    try {
+      this.resumeListener = Overair.addListener('resume', () => { void this.resumed(); })
+        .catch(() => null);
+    } catch {
+      // A plugin without events (web, a mock): checks still work, just not on resume.
+      this.resumeListener = Promise.resolve(null);
+    }
+  }
+
+  private async resumed(): Promise<void> {
+    if (this.options.checkOnResume === false || Date.now() < this.resumeAt) return;
+    try {
+      // Never over a download in progress: it would be offered the same bundle.
+      const { download } = await Overair.status();
+      if (MOVING.includes(download.state)) return;
+    } catch {
+      return;
+    }
+    this.log('back in the foreground; checking');
+    try {
+      await this.sync();
+    } catch {
+      // A resume must never surface an error; the next one asks again.
+    }
   }
 
   /**
@@ -240,7 +321,8 @@ class Updater {
       const fresh = await this.sync();
       if (fresh.reason !== 'CHECKED') return fresh;
       const identity = await Overair.identity();
-      return this.stage(manifest, 'OFFERED', identity.installId);
+      // Listeners hear this too: an offline accept can still stage.
+      return this.answered(await this.stage(manifest, 'OFFERED', identity.installId));
     })().finally(() => { this.accepting = null; });
     return this.accepting;
   }

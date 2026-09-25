@@ -72,6 +72,13 @@ var capacitorOverair = (function (exports, core) {
     function embeddedTime(value) {
         return value && !Number.isNaN(Date.parse(value)) ? value : null;
     }
+    const NO_ANSWER = {
+        reason: 'CHECKED', staged: false, deferred: null, reverted: false, update: null,
+    };
+    const DEFAULT_RESUME_GAP_MINUTES = 5;
+    /** After a check that got no answer, the next resume may ask this soon. */
+    const RESUME_RETRY_MS = 60_000;
+    const MOVING = ['DOWNLOADING', 'VERIFYING', 'UNPACKING'];
     /** How many pre-endpoint events to hold. One launch raises at most a couple;
      *  the cap only matters for a build that never syncs at all. */
     const QUEUED_EVENT_LIMIT = 20;
@@ -105,6 +112,11 @@ var capacitorOverair = (function (exports, core) {
         queued = [];
         /** The rollback already sent, so notifyReady and sync never both send it. */
         rollbackReported = null;
+        /** Every sync's answer goes here, whoever asked - the app, or a resume. */
+        listeners = new Set();
+        resumeListener = null;
+        /** When a resume may check again. */
+        resumeAt = 0;
         /** Its OWN guard, not `inFlight`. Joining a check would resolve with that
          *  check's answer - deferred - and the tap would look like it did nothing. */
         accepting = null;
@@ -116,10 +128,75 @@ var capacitorOverair = (function (exports, core) {
          */
         async sync(options = {}) {
             this.options = { ...this.options, ...options };
+            this.listenForResume();
             if (this.inFlight)
                 return this.inFlight;
-            this.inFlight = this.run().finally(() => { this.inFlight = null; });
+            this.inFlight = this.run()
+                .then((result) => this.answered(result), (error) => {
+                // Failed before it could ask: no answer, so the same one-minute wait.
+                this.answered({ ...NO_ANSWER });
+                throw error;
+            })
+                .finally(() => { this.inFlight = null; });
             return this.inFlight;
+        }
+        /** Change options without checking - e.g. switching resume checks off
+         *  from remote config. */
+        configure(options) {
+            this.options = { ...this.options, ...options };
+        }
+        /** Every sync's result, whoever started it - resume checks find updates too.
+         *  Returns a function that unsubscribes. */
+        onResult(listener) {
+            this.listeners.add(listener);
+            return () => { this.listeners.delete(listener); };
+        }
+        answered(result) {
+            // CHECKED is the answer to a check that got none (offline, no endpoint).
+            const gap = this.options.resumeGapMinutes ?? DEFAULT_RESUME_GAP_MINUTES;
+            this.resumeAt = Date.now() + (result.reason === 'CHECKED' ? RESUME_RETRY_MS : gap * 60_000);
+            for (const listener of this.listeners) {
+                try {
+                    listener(result);
+                }
+                catch {
+                    // One listener's bug is not every other listener's problem.
+                }
+            }
+            return result;
+        }
+        /** Once, from the first sync: before that there are no options to check with. */
+        listenForResume() {
+            if (this.resumeListener)
+                return;
+            try {
+                this.resumeListener = Overair.addListener('resume', () => { void this.resumed(); })
+                    .catch(() => null);
+            }
+            catch {
+                // A plugin without events (web, a mock): checks still work, just not on resume.
+                this.resumeListener = Promise.resolve(null);
+            }
+        }
+        async resumed() {
+            if (this.options.checkOnResume === false || Date.now() < this.resumeAt)
+                return;
+            try {
+                // Never over a download in progress: it would be offered the same bundle.
+                const { download } = await Overair.status();
+                if (MOVING.includes(download.state))
+                    return;
+            }
+            catch {
+                return;
+            }
+            this.log('back in the foreground; checking');
+            try {
+                await this.sync();
+            }
+            catch {
+                // A resume must never surface an error; the next one asks again.
+            }
         }
         /**
          * Tell the platform this bundle started.
@@ -222,7 +299,8 @@ var capacitorOverair = (function (exports, core) {
                 if (fresh.reason !== 'CHECKED')
                     return fresh;
                 const identity = await Overair.identity();
-                return this.stage(manifest, 'OFFERED', identity.installId);
+                // Listeners hear this too: an offline accept can still stage.
+                return this.answered(await this.stage(manifest, 'OFFERED', identity.installId));
             })().finally(() => { this.accepting = null; });
             return this.accepting;
         }
