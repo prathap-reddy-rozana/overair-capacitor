@@ -8,7 +8,8 @@ import type { PluginListenerHandle } from '@capacitor/core';
  * lives in Kotlin and Swift, because it has to run before any JavaScript does.
  * Talking to `/v1/check` is ordinary HTTP and stays up here.
  */
-export type BundleStatus = 'DOWNLOADED' | 'ACTIVE' | 'PENDING' | 'BAD';
+/** A refused bundle is not described at all: it is only an id in `quarantined`. */
+export type BundleStatus = 'DOWNLOADED' | 'ACTIVE' | 'PENDING';
 export interface BundleInfo {
     id: string;
     version: string;
@@ -75,6 +76,9 @@ export interface OverairStatus {
     rolledBack: boolean;
     /** The bundle that was rolled back, if any. */
     rolledBackId: string | null;
+    /** The last bundle whose READY the server accepted. A launch of the same
+     *  bundle sends nothing: one READY per install per bundle, not per launch. */
+    readyReportedId: string | null;
     /** Where the current or most recent download got to. Survives a reload of
      *  the web layer, because it lives natively. */
     download: DownloadStatus;
@@ -100,6 +104,9 @@ export interface OverairIdentity {
      *  so a fresh install is never moved back. Empty when not set. */
     embeddedAt: string;
     appVersion: string;
+    /** The operating system's version, e.g. "14" or "17.5.1". A targeting
+     *  attribute on the server. */
+    osVersion: string;
     /** Set from `capacitor.config.ts`, so the app need not pass them. */
     apiUrl: string;
     apiKey: string;
@@ -108,8 +115,18 @@ export interface DownloadOptions {
     id: string;
     version: string;
     url: string;
-    /** Verified natively, streaming, before a single file is written. */
+    /** Verified natively before a single file is written. */
     checksum: string;
+}
+/** What the record of a staged bundle carries, so `status()` and `rollback()`
+ *  can name it by version rather than by an opaque id. */
+export interface NextOptions {
+    id: string;
+    version?: string;
+    /** The manifest's `sha256`. */
+    checksum?: string;
+    /** Bytes on disk, as `download()` reported them. */
+    size?: number;
 }
 export interface OverairPlugin {
     /** What is running, what is waiting, what was refused, and where any
@@ -118,12 +135,17 @@ export interface OverairPlugin {
     /** Clear `rolledBack` once it has been reported. `status()` leaves it set,
      *  so whichever reader sees it first can report it. */
     acknowledgeRollback(): Promise<void>;
+    /** Record that the server has this bundle's READY, so later launches of it
+     *  do not send another. */
+    acknowledgeReady(options: {
+        id: string;
+    }): Promise<void>;
     /** Identity and configuration, from native config. */
     identity(): Promise<OverairIdentity>;
     /**
      * Download, verify and unpack a bundle. Native throughout: streamed to
-     * disk, hashed while streaming, unzipped without holding the archive in
-     * the webview's heap.
+     * disk, hashed in chunks (Android while it streams, iOS once it lands),
+     * unzipped without holding the archive in the webview's heap.
      *
      * Rejects on failure; the reason is also in `status().download.failure`,
      * which outlives a web reload.
@@ -146,9 +168,7 @@ export interface OverairPlugin {
      */
     retry(): Promise<BundleInfo>;
     /** Make a downloaded bundle the one the next launch runs. */
-    next(options: {
-        id: string;
-    }): Promise<void>;
+    next(options: NextOptions): Promise<void>;
     /**
      * Serve the staged bundle NOW, reloading the webview into it.
      *
@@ -189,7 +209,8 @@ export interface OverairPlugin {
     /** Drop ALL the way to the build compiled into the binary and forget the
      *  rest. The blunt instrument; `rollback()` is usually what you want. */
     reset(): Promise<void>;
-    /** Delete everything except what is running and what is next. */
+    /** Delete every bundle except what is running, what is next, and what ran
+     *  before - the fallback a failed boot steps back to. */
     prune(): Promise<void>;
     /** Bytes as they arrive. Throttled natively to about ten a second, because
      *  a progress bar cannot show more and every one crosses the bridge. */

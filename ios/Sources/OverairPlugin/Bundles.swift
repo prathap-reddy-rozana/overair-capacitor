@@ -44,6 +44,11 @@ public final class Bundles: NSObject {
     private var task: URLSessionDownloadTask?
     private var onProgress: Progress?
     private var completion: ((Result<URL, Error>) -> Void)?
+    /// Set by cancel(), cleared by begin(). A flag rather than only the task:
+    /// verifying and unpacking have no task to cancel, and a cancel can land
+    /// before the request exists.
+    private var cancelled = false
+    private var unpacking: Foundation.Progress?
     /// Serialises the delegate callbacks against cancel() and install().
     private let lock = NSLock()
 
@@ -65,6 +70,27 @@ public final class Bundles: NSObject {
         return task != nil
     }
 
+    /// Arm a new install. Called before the download is handed off, so a
+    /// cancel from that moment on is honoured even if no request exists yet.
+    public func begin() {
+        lock.lock()
+        cancelled = false
+        lock.unlock()
+    }
+
+    private var isCancelled: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return cancelled
+    }
+
+    /// The unpack in flight, for cancel() to stop. Synchronous, because a lock
+    /// must not be held across an await.
+    private func track(_ unzipping: Foundation.Progress?) {
+        lock.lock(); defer { lock.unlock() }
+        unpacking = unzipping
+        if cancelled { unzipping?.cancel() }
+    }
+
     /// Download, verify, unpack.
     ///
     /// The digest is checked before a single file is written, so a bundle
@@ -78,19 +104,29 @@ public final class Bundles: NSObject {
         defer { try? FileManager.default.removeItem(at: temporary) }
 
         progress("VERIFYING", 0, 0)
-        let digest = try sha256(of: temporary)
+        let digest = try sha256(of: temporary, stop: { self.isCancelled })
         guard digest.caseInsensitiveCompare(expected) == .orderedSame else {
             throw Failure.digest(expected: expected, got: digest)
         }
+        if isCancelled { throw Failure.cancelled }
 
         progress("UNPACKING", 0, 0)
         let target = directory(for: id)
         // A previous half-written attempt is rubbish, not a head start: the
         // tree must be exactly what the archive says.
         try? FileManager.default.removeItem(at: target)
+        // ZIPFoundation checks this between chunks, as Android polls between
+        // entries; cancel() flips it.
+        let unzipping = Foundation.Progress()
+        track(unzipping)
+        defer { track(nil) }
         do {
             try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
-            try FileManager.default.unzipItem(at: temporary, to: target)
+            do {
+                try FileManager.default.unzipItem(at: temporary, to: target, progress: unzipping)
+            } catch Archive.ArchiveError.cancelledOperation {
+                throw Failure.cancelled
+            }
             try rejectEscapes(in: target)
             // The web root is the top of the archive. A zipped www folder puts
             // index.html one level down and opens to a blank page.
@@ -113,6 +149,12 @@ public final class Bundles: NSObject {
     private func fetch(_ url: URL, progress: @escaping Progress) async throws -> URL {
         try await withCheckedThrowingContinuation { continuation in
             lock.lock()
+            // Stopped before the request existed: nothing to cancel later.
+            guard !cancelled else {
+                lock.unlock()
+                continuation.resume(throwing: Failure.cancelled)
+                return
+            }
             onProgress = progress
             completion = { continuation.resume(with: $0) }
             let download = session.downloadTask(with: url)
@@ -122,20 +164,25 @@ public final class Bundles: NSObject {
         }
     }
 
-    /// Stop whatever is in flight. Safe when nothing is.
+    /// Stop whatever is in flight, in any phase. Safe when nothing is.
     public func cancel() {
         lock.lock()
+        cancelled = true
         let running = task
+        let unzipping = unpacking
         lock.unlock()
         running?.cancel()
+        unzipping?.cancel()
     }
 
     /// Hashes in 1 MB chunks, so the archive never has to fit in memory.
-    public func sha256(of file: URL) throws -> String {
+    /// `stop` is asked between chunks, so a cancel does not wait out the file.
+    public func sha256(of file: URL, stop: () -> Bool = { false }) throws -> String {
         let handle = try FileHandle(forReadingFrom: file)
         defer { try? handle.close() }
         var hasher = SHA256()
         while let chunk = try handle.read(upToCount: 1_048_576), !chunk.isEmpty {
+            if stop() { throw Failure.cancelled }
             hasher.update(data: chunk)
         }
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()

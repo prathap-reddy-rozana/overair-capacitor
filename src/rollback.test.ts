@@ -30,6 +30,7 @@ const native = {
   next: vi.fn(async () => undefined),
   quarantine: vi.fn(async (_: { id: string }) => undefined),
   rollback: vi.fn(async () => ({ rolledBackTo: '1.0.0' })),
+  reset: vi.fn(async () => undefined),
 };
 
 vi.mock('@capacitor/core', () => ({
@@ -132,6 +133,75 @@ describe('rollback() on a broken bundle', () => {
 
     expect(events.find((e) => e.type === 'FAILED')?.bundle).toBe('27');
     expect(events.find((e) => e.type === 'REVERTED')?.bundle).toBe('');
+  });
+});
+
+describe('reports that outlive the reload', () => {
+  // Native reloads the webview as rollback() and reset() resolve, so an event
+  // raised after them was raised by a page that no longer existed.
+  const running = {
+    current: { id: '27' }, next: null, previous: { id: '26' }, quarantined: [],
+    rolledBack: false, rolledBackId: null,
+    download: { id: '', state: 'IDLE', failure: null },
+  };
+
+  it('are sent before rollback() hands over', async () => {
+    const events = serve({ update: null, reason: 'UP_TO_DATE' });
+    const { OverairUpdater } = await import('./index');
+    await OverairUpdater.sync(OPTIONS);
+    native.status.mockImplementationOnce(async () => running as never);
+    let seenByNative: string[] = [];
+    native.rollback.mockImplementationOnce(async () => {
+      seenByNative = events.map((e) => e.type);
+      return { rolledBackTo: '1.0.0' };
+    });
+
+    await OverairUpdater.rollback();
+
+    expect(seenByNative).toEqual(['FAILED', 'REVERTED']);
+  });
+
+  it('are sent before reset() hands over', async () => {
+    const events = serve({ update: null, reason: 'UP_TO_DATE' });
+    const { OverairUpdater } = await import('./index');
+    await OverairUpdater.sync(OPTIONS);
+    let seenByNative: string[] = [];
+    native.reset.mockImplementationOnce(async () => { seenByNative = events.map((e) => e.type); });
+
+    await OverairUpdater.reset();
+
+    expect(seenByNative).toEqual(['REVERTED']);
+  });
+
+  it('are sent before a server revert hands over', async () => {
+    const events = serve({ update: null, reason: 'REVERT_TO_EMBEDDED', revert: true });
+    let seenByNative: string[] = [];
+    native.reset.mockImplementationOnce(async () => { seenByNative = events.map((e) => e.type); });
+    const { OverairUpdater } = await import('./index');
+
+    const result = await OverairUpdater.sync(OPTIONS);
+
+    expect(result.reverted).toBe(true);
+    expect(seenByNative).toEqual(['REVERTED']);
+  });
+
+  it('never hold a rollback hostage to a dead network', async () => {
+    vi.useFakeTimers();
+    try {
+      serve({ update: null, reason: 'UP_TO_DATE' });
+      const { OverairUpdater } = await import('./index');
+      await OverairUpdater.sync(OPTIONS);
+      vi.stubGlobal('fetch', vi.fn(() => new Promise(() => undefined)) as unknown as typeof fetch);
+      native.status.mockImplementationOnce(async () => running as never);
+
+      const rolling = OverairUpdater.rollback();
+      await vi.advanceTimersByTimeAsync(3000);
+
+      await expect(rolling).resolves.toEqual({ rolledBackTo: '1.0.0' });
+      expect(native.rollback).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

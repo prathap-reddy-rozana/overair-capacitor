@@ -1,6 +1,7 @@
 package dev.overair.capacitor
 
 import android.content.Context
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import com.getcapacitor.JSArray
@@ -30,14 +31,15 @@ class OverairPlugin : Plugin() {
     private val worker = Executors.newSingleThreadExecutor()
 
     /** The live download. Held natively so a web reload - which happens on
-     *  every bundle swap - does not lose track of one already in flight. */
+     *  every bundle swap - does not lose track of one already in flight.
+     *  Volatile: the worker writes these and the plugin thread reads them. */
     private val cancelled = AtomicBoolean(false)
-    private var downloading: DownloadOptions? = null
-    private var lastFailed: DownloadOptions? = null
-    private var state = "IDLE"
-    private var bytes = 0L
-    private var total = 0L
-    private var failure: JSObject? = null
+    @Volatile private var downloading: DownloadOptions? = null
+    @Volatile private var lastFailed: DownloadOptions? = null
+    @Volatile private var state = "IDLE"
+    @Volatile private var bytes = 0L
+    @Volatile private var total = 0L
+    @Volatile private var failure: JSObject? = null
 
     private data class DownloadOptions(
         val id: String,
@@ -87,8 +89,11 @@ class OverairPlugin : Plugin() {
             // console learns about a failure no JavaScript was alive to see.
             store.quarantine(id)
             store.rolledBackId = id
-            store.next = null
-            if (store.active?.id == id) store.active = null
+            // What is left, as the decision says: a failed active bundle's
+            // predecessor is now the current one, so the next launch keeps it.
+            store.active = decision.active
+            store.next = decision.next
+            store.previous = decision.previous
         }
 
         if (decision.forget) {
@@ -140,6 +145,7 @@ class OverairPlugin : Plugin() {
             .put("quarantined", JSArray(store.quarantined()))
             .put("rolledBack", store.rolledBackId != null)
             .put("rolledBackId", store.rolledBackId ?: JSObject.NULL)
+            .put("readyReportedId", store.readyReportedId ?: JSObject.NULL)
             .put("download", downloadStatus())
         // Kept until acknowledged. Cleared here, the first reader - notifyReady,
         // which runs before sync - swallowed it and no rollback was ever reported.
@@ -149,6 +155,13 @@ class OverairPlugin : Plugin() {
     @PluginMethod
     fun acknowledgeRollback(call: PluginCall) {
         store.rolledBackId = null
+        call.resolve()
+    }
+
+    @PluginMethod
+    fun acknowledgeReady(call: PluginCall) {
+        val id = call.getString("id") ?: return call.reject("id is required")
+        store.readyReportedId = id
         call.resolve()
     }
 
@@ -166,7 +179,8 @@ class OverairPlugin : Plugin() {
                 .put("apiKey", config.getString("apiKey", "") ?: "")
                 .put("embeddedAt", config.getString("embeddedAt", "") ?: "")
                 .put("nativeBuild", nativeBuild())
-                .put("appVersion", info.versionName ?: ""),
+                .put("appVersion", info.versionName ?: "")
+                .put("osVersion", Build.VERSION.RELEASE ?: ""),
         )
     }
 
@@ -385,7 +399,9 @@ class OverairPlugin : Plugin() {
         val target = store.active
         if (target != null) bridge.setServerBasePath(target.path)
         else bridge.setServerAssetPath("public")
-        call.resolve(JSObject().put("rolledBackTo", target?.version ?: "embedded"))
+        // A record staged before next() carried the version names itself by id.
+        val name = target?.let { it.version.ifEmpty { it.id } } ?: "embedded"
+        call.resolve(JSObject().put("rolledBackTo", name))
     }
 
     @PluginMethod
@@ -419,10 +435,19 @@ class OverairPlugin : Plugin() {
         )
 
     /** versionCode, not versionName: two builds ship the same version name
-     *  all the time, and this has to change on every store release. */
+     *  all the time, and this has to change on every store release.
+     *
+     *  `longVersionCode` exists only from API 28; below it the call is a
+     *  NoSuchMethodError, which Capacitor's plugin loader does not catch, so
+     *  every launch on Android 7 and 8 crashed. Without a versionCodeMajor the
+     *  two are equal, so a device upgrading its OS keeps its bundles. */
     private fun nativeBuild(): String {
         val info = context.packageManager.getPackageInfo(context.packageName, 0)
-        @Suppress("DEPRECATION")
-        return info.longVersionCode.toString()
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            info.longVersionCode.toString()
+        } else {
+            @Suppress("DEPRECATION")
+            info.versionCode.toString()
+        }
     }
 }

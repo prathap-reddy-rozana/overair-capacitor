@@ -34,6 +34,9 @@ npm install github:prathap-reddy-rozana/overair-capacitor
 npx cap sync
 ```
 
+Capacitor 8: the Swift package requires `capacitor-swift-pm` 8, so the peer
+range is `^8.0.0`.
+
 Then configure the binary in `capacitor.config.ts`. These belong here, not in
 your app code: this file is compiled into the binary and an update cannot
 rewrite it.
@@ -178,8 +181,12 @@ await OverairUpdater.cancel();   // safe whether or not one is running
 await OverairUpdater.retry();    // rejects when the failure is not retryable
 ```
 
-States are `DOWNLOADING`, `VERIFYING`, `UNPACKING`, `READY`, `FAILED`,
-`CANCELLED`. Verifying and unpacking are separate because they are separately
+A cancel is not a failure and is not reported as one. The update comes back as
+`deferred`, so the same card can offer it again, and the consent it was given
+is spent: `accept()` has to be called again before it downloads.
+
+States are `IDLE` (nothing in flight), `DOWNLOADING`, `VERIFYING`,
+`UNPACKING`, `READY`, `FAILED`, `CANCELLED`. Verifying and unpacking are separate because they are separately
 slow and separately able to fail.
 
 **`retry()` re-checks rather than replaying.** Download URLs are presigned and
@@ -262,8 +269,7 @@ platform is rolling back when the other is not.
 ```bash
 npm install && npm run build          # TypeScript
 npm test                              # TypeScript tests
-xcodebuild -scheme OverairCapacitor \
-  -destination 'generic/platform=iOS Simulator' build   # iOS
+npm run verify:ios                    # iOS: xcodebuild for a generic simulator
 ```
 
 Swift tests need a simulator destination, and the Kotlin ones need a host app
@@ -280,8 +286,6 @@ TypeScript change.
 
 ## Not yet
 
-- **Android is unverified end to end.** It compiles and its unit tests pass,
-  but no Android device has taken an update.
 - **Deltas.** The server offers them; this downloads the full bundle. Safe to
   defer because the full URL is always offered beside a delta.
 - **No resume.** A cancelled or dropped download restarts from zero.

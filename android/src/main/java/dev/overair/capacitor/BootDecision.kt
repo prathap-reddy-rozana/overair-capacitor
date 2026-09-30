@@ -36,6 +36,11 @@ data class BootDecision(
     val forget: Boolean,
     /** Refuse this bundle forever - it was given a launch and never came back. */
     val markBad: String?,
+    /** What the store holds after this launch. A failed active bundle hands
+     *  over to its predecessor, which becomes the confirmed current one. */
+    val active: BundleRecord? = null,
+    val next: BundleRecord? = null,
+    val previous: BundleRecord? = null,
 ) {
     val isFirstBoot: Boolean get() = because == Because.FIRST_BOOT
 }
@@ -52,6 +57,7 @@ object Boot {
 
         var active = facts.active
         var next = facts.next
+        var previous = facts.previous
         var markBad: String? = null
 
         // Pending means the previous launch served a bundle and that bundle
@@ -64,20 +70,27 @@ object Boot {
             // The bundle that failed WAS the active one, so step back to its
             // predecessor rather than throwing away every update this device
             // ever took. Embedded is the floor, not the first resort.
-            if (markBad != null && active?.id == markBad) active = facts.previous
+            // Promoted, not just served: left in `previous`, the next launch
+            // found no active bundle and went to embedded after all.
+            if (markBad != null && active?.id == markBad) {
+                active = previous
+                previous = null
+            }
         }
 
         // A bundle that has never started goes first. One launch is what it
         // gets to prove itself.
         next?.let {
-            return BootDecision(Run.BUNDLE, Because.FIRST_BOOT, it, forget = false, markBad = markBad)
+            return BootDecision(Run.BUNDLE, Because.FIRST_BOOT, it, forget = false, markBad = markBad,
+                active = active, next = it, previous = previous)
         }
 
         // Falling back to the last CONFIRMED bundle rather than all the way
         // to embedded: it has already proved it starts, so the user keeps
         // their most recent working update instead of losing every one.
         active?.let {
-            return BootDecision(Run.BUNDLE, Because.CONFIRMED, it, forget = false, markBad = markBad)
+            return BootDecision(Run.BUNDLE, Because.CONFIRMED, it, forget = false, markBad = markBad,
+                active = it, next = null, previous = previous)
         }
 
         return BootDecision(
@@ -86,6 +99,7 @@ object Boot {
             null,
             forget = false,
             markBad = markBad,
+            previous = previous,
         )
     }
 }

@@ -70,7 +70,7 @@ called `notifyReady()`
 | 3 | yes | staged | no | **the staged bundle** | mark PENDING; it gets one launch to prove itself |
 | 4 | yes | active | no | the active bundle | check for an update |
 | 5 | yes | staged + active | **yes** | the **active** one | quarantine the staged bundle, report `FAILED` |
-| 6 | yes | active + previous | **yes** | the **previous** one | quarantine the active bundle |
+| 6 | yes | active + previous | **yes** | the **previous** one | quarantine the active bundle; the previous **becomes** the active one |
 | 7 | yes | active only | **yes** | embedded | quarantine it; nothing left to fall back to |
 
 Rows 2, 5, 6 and 7 are the ones that earn the table.
@@ -86,6 +86,12 @@ combination of facts, in both `BootDecisionTest.kt` and `BootDecisionTests.swift
 > Embedded is the floor, not the first resort - which is why the store keeps a
 > predecessor and `prune()` keeps its files. A fallback whose files were
 > deleted is not a fallback.
+>
+> **Corrected.** Row 6 first served the predecessor without promoting it: the
+> active record was cleared and the predecessor left where it was, so the
+> launch after found nothing active and served embedded anyway. The decision
+> now also returns what the store holds afterwards, and both test files follow
+> it one launch further.
 
 <details open>
 <summary>Diagram 1 — the boot path</summary>
@@ -182,12 +188,12 @@ running.
 
 | State | Meaning |
 |---|---|
-| `DOWNLOADING` | streaming to disk, hashing as it goes |
-| `VERIFYING` | digest checked before a single file is written |
+| `DOWNLOADING` | streaming to disk; Android hashes as it goes |
+| `VERIFYING` | digest checked before a single file is written; iOS hashes the landed file here |
 | `UNPACKING` | expanding; entries that escape the directory are refused |
 | `READY` | on disk and verified |
 | `FAILED` | with a `code` and whether a retry is worth offering |
-| `CANCELLED` | somebody stopped it |
+| `CANCELLED` | somebody stopped it - honoured in every phase, including before the request exists; partial output deleted |
 
 Verifying and unpacking are separate states because they are separately slow
 and separately able to fail: a digest mismatch and a corrupt archive are
@@ -241,7 +247,7 @@ release - a build that is actively broken is worth the megabytes.
 | Native build changed | every bundle discarded, embedded serves |
 | `applyNow()` with nothing staged | rejects |
 | `rollback()` with no predecessor | lands on embedded |
-| Archive entry containing `..` or a symlink | refused before anything is written |
+| Archive entry containing `..` or a symlink | refused, and everything already unpacked deleted - never served |
 | Airplane mode | check fails silently, app runs on what it has |
 
 ---
@@ -283,6 +289,12 @@ reach.
 | **A deferred update could not be accepted** | `SyncResult.deferred` was a manifest the app could display and nothing else: the `Updater` had no method to stage it. Every bundle over `auto_max_bytes` was a dead end, and no test noticed because the ceiling only bites on a real bundle's real size. |
 | **Retry did nothing for a deferred bundle** | `retry()` re-checks rather than replaying, so the ceiling deferred the very bundle the user had just agreed to. Download state stayed FAILED and the button was inert however often it was pressed. Fixed by remembering the accepted bundle id - a flag would have auto-downloaded the NEXT large update too. |
 | **A cancel hid the offer for the rest of the process** | The host gated its card on state `IDLE`, and only `notifyReady` returns the machine to IDLE. One tap on Stop and the user was never asked again until they force-quit. A host bug, but caused by the plugin having no state meaning "nothing in flight". |
+| **Every launch crashed on Android 7 and 8** | `load()` read `PackageInfo.longVersionCode`, which exists only from API 28; the host's floor is 24. Below 28 it is a `NoSuchMethodError`, an Error that Capacitor's plugin loader (which catches `Exception`) lets out of `Bridge.<init>`. Lint reported it as `NewApi` and `abortOnError false` let the build pass anyway. Now read by SDK level, and lint fails the build on `NewApi`. |
+| **Every bundle was recorded with no version** | `next()` was called with the id alone, and native filled the rest with "" and 0. The host's build details sheet showed a blank version for the bundle it was running, and `rollback()` reported going back to "". The mocks answered with whatever the test put in them. |
+| **Stop was reported as the release failing** | A cancel rejected `download()`, and the SDK sent `FAILED`/`stage_failed`; the server quarantines an install's bundle after three of those, so three taps on Stop refused it for 30 days. The consent outlived the cancel while the offer did not: `accept()` threw "nothing deferred" and the next check downloaded the bundle the user had stopped. Now a cancel sends nothing, spends the consent and offers the manifest back, and the stopped bundle is deferred on later checks until accepted, whatever its size: a bundle under `auto_max_bytes` was otherwise downloaded again by the next resume check. A mandatory one still downloads. The quarantine rule lives on the server, where no plugin test looks. |
+| **READY was sent on every launch** | `notifyReady()` reported the running bundle each time the app started, and the server keeps every event, so a device opened ten times a day counted ten times in the health gate's READY ratio. Now once per install per bundle: native keeps the last id the server accepted, written only after it did, so an offline launch still sends it later. Only a fleet makes the ratio visible. |
+| **Rollback and reset reports were sent by a page already gone** | Native reloads the webview as `rollback()` and `reset()` resolve, and the SDK reported `FAILED`/`REVERTED` after they did - from a JavaScript context the reload was tearing down. Now sent first, waiting at most three seconds so a dead network cannot keep a broken bundle on screen. A mocked plugin does not reload anything. |
+| **An oversized attribute switched updates off for good** | The server refuses the whole check with a 400 when `attrs` is over 4096 bytes or a string field is over its cap, and the SDK reads any failed check as offline. Nothing said so, and the next check was just as big. Now the strings are trimmed to their caps and oversized `attrs` dropped with a debug line; an event's `detail` is shortened to fit, measured as the server measures it, where a non-ASCII character is six bytes. Only the app's real data is that big. |
 
 ---
 
@@ -292,11 +304,12 @@ reach.
   emulator took `1.0.0-android` over the deferred path - offered, accepted by
   tap, downloaded, verified, unpacked, applied - and reported itself running
   it on the next check. Both platforms are now proven against the live API.
-- **`os_version` is sent empty.** `run()` hardcodes `os_version: ''`, so the
-  console offers OS version as a targeting attribute and a rule on it matches
-  nobody - the empty string compares below every real version. Android has
-  `Build.VERSION.RELEASE`, iOS `UIDevice.current.systemVersion`; both belong in
-  `identity()` beside `appVersion`.
+- **~~`os_version` is sent empty.~~** Done: `identity()` carries `osVersion`
+  beside `appVersion` - Android's `Build.VERSION.RELEASE`, iOS's
+  `operatingSystemVersion` in `UIDevice.systemVersion`'s form (read from
+  `ProcessInfo`, because UIDevice belongs to the main thread) - and the check
+  sends it, capped at the server's 40 characters. A rule on OS version now
+  matches devices that report one; a binary built before this still sends ''.
 - **No resume.** A cancelled or dropped download restarts from zero. iOS gives
   resume data for free via `cancel(byProducingResumeData:)`; Android would need
   a `Range` header. Worth doing before large bundles ship over patchy links.
@@ -312,4 +325,4 @@ reach.
 
 ---
 
-<sub>overair-capacitor. Verified: 10 Swift, 10 Kotlin and 6 TypeScript tests; an end-to-end update applied on an iPhone 16 Pro simulator against a live server.</sub>
+<sub>overair-capacitor. Verified: 12 Swift, 12 Kotlin and 65 TypeScript tests; end to end against a live server, an update applied on an iPhone 16 Pro simulator and (22 Sep 2026) an Android emulator - neither repeated since the 29 Sep fixes.</sub>

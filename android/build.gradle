@@ -33,7 +33,11 @@ android {
         jvmTarget = '21'
     }
     lintOptions {
-        abortOnError false
+        // A call above minSdk crashes on older devices, and a bug in this
+        // plugin needs a store release to fix. longVersionCode shipped that way,
+        // past a NewApi error that `abortOnError false` let through.
+        abortOnError true
+        fatal 'NewApi'
     }
 }
 

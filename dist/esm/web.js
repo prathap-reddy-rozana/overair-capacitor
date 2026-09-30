@@ -12,7 +12,7 @@ export class OverairWeb extends WebPlugin {
     async status() {
         return {
             current: null, next: null, previous: null, quarantined: [],
-            rolledBack: false, rolledBackId: null,
+            rolledBack: false, rolledBackId: null, readyReportedId: null,
             download: this.idle(),
         };
     }
@@ -20,6 +20,9 @@ export class OverairWeb extends WebPlugin {
         return { id: '', state: 'IDLE', bytes: 0, total: 0, fraction: -1, failure: null };
     }
     async acknowledgeRollback() {
+        return;
+    }
+    async acknowledgeReady(_options) {
         return;
     }
     async identity() {
@@ -30,6 +33,7 @@ export class OverairWeb extends WebPlugin {
             nativeBuild: '',
             embeddedAt: '',
             appVersion: '',
+            osVersion: '',
             apiUrl: '',
             apiKey: '',
         };

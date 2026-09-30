@@ -21,6 +21,13 @@ final class BootDecisionTests: XCTestCase {
                   active: active, next: next, previous: previous, pending: pending)
     }
 
+    /// The launch after this one, from what the decision left in the store.
+    private func nextLaunch(_ decision: BootDecision) -> BootDecision {
+        Boot.decide(BootFacts(nativeBuild: "42", storedBuild: "42",
+                              active: decision.active, next: decision.next,
+                              previous: decision.previous, pending: decision.isFirstBoot))
+    }
+
     /// Row 1 - a fresh install has nothing to run but the binary.
     func testNothingOnDiskRunsEmbedded() {
         let decision = Boot.decide(facts(stored: nil))
@@ -90,6 +97,30 @@ final class BootDecisionTests: XCTestCase {
         XCTAssertFalse(decision.isFirstBoot)
     }
 
+    /// Row 6, one launch on. Served but left in `previous`, the predecessor
+    /// was gone the launch after and the user dropped to embedded after all.
+    func testThePredecessorStaysCurrentAfterAFailedActive() {
+        let decision = Boot.decide(
+            facts(active: record("a"), previous: record("older"), pending: true))
+        XCTAssertEqual(decision.active?.id, "older")
+        XCTAssertNil(decision.previous)
+        XCTAssertNil(decision.next)
+
+        let after = nextLaunch(decision)
+        XCTAssertEqual(after.run, .bundle)
+        XCTAssertEqual(after.record?.id, "older")
+        XCTAssertNil(after.markBad)
+    }
+
+    /// Row 5 leaves the confirmed bundle and its predecessor where they were.
+    func testAFailedStagedBootKeepsActiveAndPredecessor() {
+        let decision = Boot.decide(
+            facts(active: record("a"), next: record("b"), previous: record("older"), pending: true))
+        XCTAssertEqual(decision.active?.id, "a")
+        XCTAssertEqual(decision.previous?.id, "older")
+        XCTAssertNil(decision.next)
+    }
+
     /// A predecessor is not a substitute for the staged bundle: when NEXT is
     /// what failed, the confirmed active one still wins over anything older.
     func testFailedStagedPrefersActiveOverPredecessor() {
@@ -113,10 +144,17 @@ final class BootDecisionTests: XCTestCase {
     func testAPendingBundleIsNeverServedTwice() {
         for active in [nil, record("a")] {
             for next in [nil, record("b")] {
-                let decision = Boot.decide(facts(active: active, next: next, pending: true))
-                if let bad = decision.markBad {
-                    XCTAssertNotEqual(decision.record?.id, bad,
-                                      "served \(bad) again after it failed to confirm")
+                for previous in [nil, record("older")] {
+                    let decision = Boot.decide(
+                        facts(active: active, next: next, previous: previous, pending: true))
+                    if let bad = decision.markBad {
+                        XCTAssertNotEqual(decision.record?.id, bad,
+                                          "served \(bad) again after it failed to confirm")
+                        // Nor on any later launch: it is gone from the store.
+                        let kept = [decision.active?.id, decision.next?.id, decision.previous?.id]
+                        XCTAssertFalse(kept.contains(bad), "kept \(bad) after it failed to confirm")
+                        XCTAssertNotEqual(nextLaunch(decision).record?.id, bad)
+                    }
                 }
             }
         }

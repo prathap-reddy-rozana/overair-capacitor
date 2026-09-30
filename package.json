@@ -28,12 +28,11 @@
     "clean": "rimraf ./dist",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "verify:ios": "cd ios && swift build",
-    "verify:android": "cd android && ./gradlew clean build test"
+    "verify:ios": "xcodebuild -scheme OverairCapacitor -destination 'generic/platform=iOS Simulator' build"
   },
   "dependencies": {},
   "peerDependencies": {
-    "@capacitor/core": ">=6"
+    "@capacitor/core": "^8.0.0"
   },
   "devDependencies": {
     "@capacitor/android": "^8.4.2",

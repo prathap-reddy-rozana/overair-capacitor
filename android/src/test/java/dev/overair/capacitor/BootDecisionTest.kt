@@ -28,6 +28,11 @@ class BootDecisionTest {
         pending: Boolean = false,
     ) = BootFacts("42", stored, active, next, previous, pending)
 
+    /** The launch after this one, from what the decision left in the store. */
+    private fun nextLaunch(decision: BootDecision) = Boot.decide(
+        BootFacts("42", "42", decision.active, decision.next, decision.previous, decision.isFirstBoot),
+    )
+
     /** Row 1 - a fresh install has nothing to run but the binary. */
     @Test
     fun `nothing on disk runs embedded`() {
@@ -104,6 +109,34 @@ class BootDecisionTest {
         assertFalse(decision.isFirstBoot)
     }
 
+    /** Row 6, one launch on. Served but left in `previous`, the predecessor
+     *  was gone the launch after and the user dropped to embedded after all. */
+    @Test
+    fun `the predecessor stays current after a failed active`() {
+        val decision = Boot.decide(
+            facts(active = record("a"), previous = record("older"), pending = true),
+        )
+        assertEquals("older", decision.active?.id)
+        assertNull(decision.previous)
+        assertNull(decision.next)
+
+        val after = nextLaunch(decision)
+        assertEquals(Run.BUNDLE, after.run)
+        assertEquals("older", after.record?.id)
+        assertNull(after.markBad)
+    }
+
+    /** Row 5 leaves the confirmed bundle and its predecessor where they were. */
+    @Test
+    fun `a failed staged boot keeps active and predecessor`() {
+        val decision = Boot.decide(
+            facts(active = record("a"), next = record("b"), previous = record("older"), pending = true),
+        )
+        assertEquals("a", decision.active?.id)
+        assertEquals("older", decision.previous?.id)
+        assertNull(decision.next)
+    }
+
     /** A predecessor is not a substitute for the staged bundle: when NEXT is
      *  what failed, the confirmed active one still wins over anything older. */
     @Test
@@ -131,10 +164,18 @@ class BootDecisionTest {
     fun `a pending bundle is never served twice`() {
         for (active in listOf(null, record("a"))) {
             for (next in listOf(null, record("b"))) {
-                val decision = Boot.decide(facts(active = active, next = next, pending = true))
-                decision.markBad?.let { bad ->
-                    assertNotEquals("served $bad again after it failed to confirm",
-                        bad, decision.record?.id)
+                for (previous in listOf(null, record("older"))) {
+                    val decision = Boot.decide(
+                        facts(active = active, next = next, previous = previous, pending = true),
+                    )
+                    decision.markBad?.let { bad ->
+                        assertNotEquals("served $bad again after it failed to confirm",
+                            bad, decision.record?.id)
+                        // Nor on any later launch: it is gone from the store.
+                        assertFalse("kept $bad after it failed to confirm",
+                            bad in listOfNotNull(decision.active?.id, decision.next?.id, decision.previous?.id))
+                        assertNotEquals(bad, nextLaunch(decision).record?.id)
+                    }
                 }
             }
         }

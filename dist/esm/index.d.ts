@@ -35,7 +35,7 @@ export interface SyncResult {
  * Keyed on the bundle id rather than a flag: agreeing to one large update is
  * not agreeing to the next one.
  */
-export declare function shouldDefer(update: Manifest, acceptedId: string | null): boolean;
+export declare function shouldDefer(update: Manifest, acceptedId: string | null, stoppedId?: string | null): boolean;
 export interface UpdaterOptions {
     /** All four default to the values in `capacitor.config`, which is where they
      *  belong: the binary's own configuration, not the replaceable web layer. */
@@ -89,18 +89,22 @@ declare class Updater {
     /** The bundle the user has already said yes to. Per bundle id, not a flag:
      *  agreeing to one large update is not agreeing to the next one. */
     private acceptedId;
+    /** The bundle the person stopped, deferred until they accept it. Without it
+     *  a bundle under the ceiling was downloaded again by the next check. */
+    private stoppedId;
     /**
      * Events raised before an endpoint was known.
      *
-     * `notifyReady` runs BEFORE the first sync on purpose - the watchdog has to
-     * be satisfied before a check can overtake it - so the READY it emits has
-     * nowhere to go yet. `this.api?.report(...)` turned that into a silent
-     * no-op, which left `ready` at zero for every real fleet while
-     * `pause_below_ready_bps` was reading exactly that number.
+     * `this.api?.report(...)` once made these a silent no-op, which left
+     * `ready` at zero for every real fleet while `pause_below_ready_bps` was
+     * reading exactly that number. READY itself now waits in `confirmed`, so
+     * it can be acknowledged once the server has it; this holds the rest.
      */
     private queued;
     /** The rollback already sent, so notifyReady and sync never both send it. */
     private rollbackReported;
+    /** The bundle this launch confirmed, until the server has its READY. */
+    private confirmed;
     /** Every sync's answer goes here, whoever asked - the app, or a resume. */
     private listeners;
     private resumeListener;
@@ -135,6 +139,13 @@ declare class Updater {
      * actually works, not that a file parsed.
      */
     notifyReady(): Promise<void>;
+    /**
+     * READY once per install per bundle, not once per launch: the server keeps
+     * every one, and a device that launches ten times a day counted ten times
+     * in the health gate. Held until the endpoint is known, and acknowledged
+     * only once the server has it, so an offline launch sends it later.
+     */
+    private reportReady;
     /**
      * A rollback happens natively, before any JavaScript exists to see it.
      * Acknowledged only once the server has the report: cleared on a queued
@@ -207,7 +218,9 @@ declare class Updater {
     reset(): Promise<void>;
     private run;
     private stage;
-    private unusable;
+    /** Why native says this bundle's download ended, or null when it has not
+     *  recorded a failure for it. */
+    private failureCode;
     /** Telemetry never makes a device wait, and a failed report must never
      *  fail the update it was describing. */
     /** True once the server has the event; false when held or dropped. */
