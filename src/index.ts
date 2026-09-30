@@ -1,8 +1,9 @@
 import { Capacitor, registerPlugin } from '@capacitor/core';
 
 import { DeliveryApi } from './api';
+import { capCheck, capDetail } from './limits';
 import type {
-  DownloadProgress, DownloadStatus, OverairPlugin, OverairStatus,
+  DownloadProgress, DownloadStatus, FailureCode, OverairPlugin, OverairStatus,
 } from './definitions';
 import type { CheckResponse, DeviceEvent, Manifest, Platform, Reason } from './types';
 
@@ -46,9 +47,13 @@ export interface SyncResult {
  * Keyed on the bundle id rather than a flag: agreeing to one large update is
  * not agreeing to the next one.
  */
-export function shouldDefer(update: Manifest, acceptedId: string | null): boolean {
+export function shouldDefer(
+  update: Manifest, acceptedId: string | null, stoppedId: string | null = null,
+): boolean {
   if (update.mandatory) return false;
   if (update.bundle_id === acceptedId) return false;
+  // Stopped by the person: whatever its size, it waits to be asked for again.
+  if (update.bundle_id === stoppedId) return true;
   return update.auto_max_bytes > 0 && update.size > update.auto_max_bytes;
 }
 
@@ -105,8 +110,24 @@ const MOVING = ['DOWNLOADING', 'VERIFYING', 'UNPACKING'];
  *  the cap only matters for a build that never syncs at all. */
 const QUEUED_EVENT_LIMIT = 20;
 
-/** Longest failure message reported; keeps an event under the server's cap. */
+/** Longest failure message reported. The server's cap is in bytes, and
+ *  `capDetail` is what keeps a non-ASCII message under it. */
 const MAX_MESSAGE = 1000;
+
+/** How long a report may hold up a rollback or reset. */
+const REPORT_BEFORE_RELOAD_MS = 3000;
+
+/** Wait for `work`, but never past `ms`: a dead network must not be why a
+ *  broken bundle stays on screen. */
+function bounded(work: Promise<unknown>, ms: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const limit = new Promise<void>((resolve) => { timer = setTimeout(resolve, ms); });
+  return Promise.race([work.then(() => undefined, () => undefined), limit])
+    .finally(() => clearTimeout(timer));
+}
+
+/** Native's refusal of a second concurrent download, word for word. */
+const ALREADY_RUNNING = 'a download is already running';
 
 /**
  * The protocol half of the SDK.
@@ -124,18 +145,22 @@ class Updater {
   /** The bundle the user has already said yes to. Per bundle id, not a flag:
    *  agreeing to one large update is not agreeing to the next one. */
   private acceptedId: string | null = null;
+  /** The bundle the person stopped, deferred until they accept it. Without it
+   *  a bundle under the ceiling was downloaded again by the next check. */
+  private stoppedId: string | null = null;
   /**
    * Events raised before an endpoint was known.
    *
-   * `notifyReady` runs BEFORE the first sync on purpose - the watchdog has to
-   * be satisfied before a check can overtake it - so the READY it emits has
-   * nowhere to go yet. `this.api?.report(...)` turned that into a silent
-   * no-op, which left `ready` at zero for every real fleet while
-   * `pause_below_ready_bps` was reading exactly that number.
+   * `this.api?.report(...)` once made these a silent no-op, which left
+   * `ready` at zero for every real fleet while `pause_below_ready_bps` was
+   * reading exactly that number. READY itself now waits in `confirmed`, so
+   * it can be acknowledged once the server has it; this holds the rest.
    */
   private queued: DeviceEvent[] = [];
   /** The rollback already sent, so notifyReady and sync never both send it. */
   private rollbackReported: string | null = null;
+  /** The bundle this launch confirmed, until the server has its READY. */
+  private confirmed: string | null = null;
   /** Every sync's answer goes here, whoever asked - the app, or a resume. */
   private listeners = new Set<(result: SyncResult) => void>();
   private resumeListener: Promise<unknown> | null = null;
@@ -233,7 +258,30 @@ class Updater {
     await Overair.notifyReady();
     const status = await Overair.status();
     await this.reportRollback(status);
-    if (status.current) await this.emit('READY', status.current.id);
+    this.confirmed = status.current?.id ?? null;
+    await this.reportReady(status);
+  }
+
+  /**
+   * READY once per install per bundle, not once per launch: the server keeps
+   * every one, and a device that launches ten times a day counted ten times
+   * in the health gate. Held until the endpoint is known, and acknowledged
+   * only once the server has it, so an offline launch sends it later.
+   */
+  private async reportReady(status: OverairStatus): Promise<void> {
+    const id = this.confirmed;
+    if (!id || !this.api) return;
+    if (id === status.readyReportedId) {
+      this.confirmed = null;
+      return;
+    }
+    if (!(await this.emit('READY', id))) return;
+    this.confirmed = null;
+    try {
+      await Overair.acknowledgeReady({ id });
+    } catch {
+      // At worst the next launch sends it once more.
+    }
   }
 
   /**
@@ -314,6 +362,7 @@ class Updater {
     // Remembered BEFORE the check, so the ceiling does not defer the very
     // bundle this call is agreeing to (and `retry` can take it later).
     this.acceptedId = manifest.bundle_id;
+    this.stoppedId = null;
     this.accepting = (async () => {
       // A check already running started before the consent; its answer is
       // "deferred", so wait it out and ask again.
@@ -362,18 +411,25 @@ class Updater {
    */
   async rollback(): Promise<{ rolledBackTo: string }> {
     const status = await Overair.status();
-    const result = await Overair.rollback();
-    if (status.current) await this.emit('FAILED', status.current.id, 'app_reported');
-    // No bundle: the server quarantines the bundle an event names, and the
-    // previous one is where this device is going, not what failed.
-    await this.emit('REVERTED');
-    return result;
+    // Nothing to report: native refuses, as it always has.
+    if (!status.current) return Overair.rollback();
+    const failed = status.current.id;
+    // Sent FIRST. Native reloads the webview as it resolves, and events
+    // raised after it went down with this JavaScript context.
+    await bounded((async () => {
+      await this.emit('FAILED', failed, 'app_reported');
+      // No bundle: the server quarantines the bundle an event names, and the
+      // previous one is where this device is going, not what failed.
+      await this.emit('REVERTED');
+    })(), REPORT_BEFORE_RELOAD_MS);
+    return Overair.rollback();
   }
 
   /** Back to the build compiled into the binary, forgetting the rest. */
   async reset(): Promise<void> {
+    // Before, for the reason rollback() gives.
+    await bounded(this.emit('REVERTED'), REPORT_BEFORE_RELOAD_MS);
     await Overair.reset();
-    await this.emit('REVERTED');
   }
 
   private async run(): Promise<SyncResult> {
@@ -392,24 +448,27 @@ class Updater {
 
     const status = await Overair.status();
     await this.reportRollback(status);
+    await this.reportReady(status);
 
     let response: CheckResponse;
     try {
-      response = await this.api.check({
+      // Capped here: over any server limit the whole check is refused, and a
+      // refused check reads as offline, forever.
+      response = await this.api.check(capCheck({
         install_id: identity.installId,
         platform: Capacitor.getPlatform() as Platform,
         runtime: this.options.runtime || identity.runtime,
         channel: this.options.channel || identity.channel,
         app_version: identity.appVersion,
         build_number: identity.nativeBuild,
-        os_version: '',
+        os_version: identity.osVersion ?? '',
         locale: typeof navigator !== 'undefined' ? navigator.language : '',
         custom_id: this.options.customId ?? '',
         attrs: this.options.attrs ?? {},
         current_bundle: status.current?.id ?? '',
         embedded_at: embeddedTime(this.options.embeddedAt || identity.embeddedAt),
         quarantined: status.quarantined,
-      });
+      }, (message) => this.log(message)));
     } catch (error) {
       // Offline is the normal case, not an error worth surfacing: the app
       // runs on what it has and asks again next time.
@@ -419,8 +478,8 @@ class Updater {
 
     this.log(`check -> ${response.reason}`);
     if (response.revert) {
+      await bounded(this.emit('REVERTED'), REPORT_BEFORE_RELOAD_MS);
       await Overair.reset();
-      await this.emit('REVERTED');
       return {
         reason: response.reason, staged: false, deferred: null, reverted: true, update: null,
       };
@@ -430,7 +489,7 @@ class Updater {
     this.deferred = null;
     if (!update) return { ...idle, reason: response.reason };
 
-    if (shouldDefer(update, this.acceptedId)) {
+    if (shouldDefer(update, this.acceptedId, this.stoppedId)) {
       this.log(`deferred ${update.version}: ${update.size} over ${update.auto_max_bytes}`);
       this.deferred = update;
       return {
@@ -455,14 +514,21 @@ class Updater {
   private async stage(update: Manifest, reason: Reason, installId: string): Promise<SyncResult> {
     await this.emit('DOWNLOAD_STARTED', update.bundle_id);
     try {
-      await Overair.download({
+      const downloaded = await Overair.download({
         id: update.bundle_id,
         version: update.version,
         url: update.url,
         checksum: update.sha256,
       });
       await this.emit('DOWNLOADED', update.bundle_id);
-      await Overair.next({ id: update.bundle_id });
+      // Named in full: with only the id, every record read version "" and a
+      // rollback reported it had gone back to "".
+      await Overair.next({
+        id: update.bundle_id,
+        version: update.version,
+        checksum: update.sha256,
+        size: downloaded?.size ?? update.size,
+      });
       await this.emit('APPLIED', update.bundle_id);
       this.log(`staged ${update.version}; it runs on the next launch`);
       this.deferred = null;
@@ -470,9 +536,27 @@ class Updater {
       return { reason, staged: true, deferred: null, reverted: false, update };
     } catch (error) {
       const message = (error as Error).message;
+      // First: native refused before touching its failure record, so what
+      // that record says belongs to an earlier attempt.
+      if (message.includes(ALREADY_RUNNING)) {
+        // Another download holds native; this one never started.
+        this.log(`${update.version} not started: ${message}`);
+        return { reason, staged: false, deferred: null, reverted: false, update };
+      }
+      const code = await this.failureCode(update.bundle_id);
+      if (code === 'cancelled') {
+        // The person said stop. Not a failure of the release: reported as
+        // one, three taps on Stop quarantined it server-side. The consent is
+        // spent, and the manifest is offered back so they can say yes again.
+        this.log(`${update.version} cancelled`);
+        this.acceptedId = null;
+        this.stoppedId = update.bundle_id;
+        this.deferred = update;
+        return { reason, staged: false, deferred: update, reverted: false, update };
+      }
       this.log(`staging failed: ${message}`);
       const detail = { message: message.slice(0, MAX_MESSAGE), installId };
-      if (await this.unusable(update.bundle_id)) {
+      if (code === 'unpack' || code === 'digest') {
         // The same URL gives the same bytes: a digest mismatch or an archive
         // that cannot run here. Refused on this device and on the server.
         try {
@@ -484,19 +568,20 @@ class Updater {
       } else {
         // NOT quarantined: a download or disk failure, not a bundle that
         // cannot run. Refusing it forever would refuse bytes never tried.
-        // Capped: the server refuses an event whose detail is over 4 KB.
         await this.emit('FAILED', update.bundle_id, 'stage_failed', detail);
       }
       return { reason, staged: false, deferred: null, reverted: false, update };
     }
   }
 
-  private async unusable(id: string): Promise<boolean> {
+  /** Why native says this bundle's download ended, or null when it has not
+   *  recorded a failure for it. */
+  private async failureCode(id: string): Promise<FailureCode | null> {
     try {
       const { failure } = (await Overair.status()).download;
-      return failure?.id === id && (failure.code === 'unpack' || failure.code === 'digest');
+      return failure?.id === id ? failure.code : null;
     } catch {
-      return false;
+      return null;
     }
   }
 
@@ -512,7 +597,7 @@ class Updater {
         type,
         bundle: bundle ?? '',
         error_code: errorCode ?? '',
-        detail: detail ?? {},
+        detail: capDetail(detail ?? {}),
       };
       if (!this.api) {
         // Held, not dropped. Bounded, because a build with OTA switched off

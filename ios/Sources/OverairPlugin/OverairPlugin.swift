@@ -17,6 +17,7 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
     public let pluginMethods: [CAPPluginMethod] = [
         CAPPluginMethod(name: "status", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "acknowledgeRollback", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "acknowledgeReady", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "identity", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "download", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "cancel", returnType: CAPPluginReturnPromise),
@@ -31,7 +32,9 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
     ]
 
     private let store = Store()
-    private lazy var bundles = Bundles(root: Self.bundleRoot())
+    // Not lazy: a lazy var first touched from two queues can make two, and a
+    // cancel sent to one never reaches the download running in the other.
+    private let bundles = Bundles(root: OverairPlugin.bundleRoot())
 
     /// The live download. Held natively so a web reload - which happens on
     /// every bundle swap - does not lose track of one already in flight.
@@ -47,6 +50,14 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
     private var bytes: Int64 = 0
     private var total: Int64 = 0
     private var failure: [String: Any]?
+    /// Guards the six fields above: the download Task and URLSession's
+    /// delegate queue write them, Capacitor's plugin queue reads them.
+    private let lock = NSLock()
+
+    private func locked<T>(_ body: () -> T) -> T {
+        lock.lock(); defer { lock.unlock() }
+        return body()
+    }
 
     private static func bundleRoot() -> URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory,
@@ -79,8 +90,11 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
             // console learns about a failure no JavaScript was alive to see.
             store.quarantine(bad)
             store.rolledBackId = bad
-            store.next = nil
-            if store.active?.id == bad { store.active = nil }
+            // What is left, as the decision says: a failed active bundle's
+            // predecessor is now the current one, so the next launch keeps it.
+            store.active = decision.active
+            store.next = decision.next
+            store.previous = decision.previous
         }
 
         if decision.forget {
@@ -114,6 +128,7 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
             "quarantined": store.quarantined,
             "rolledBack": store.rolledBackId != nil,
             "rolledBackId": store.rolledBackId as Any,
+            "readyReportedId": store.readyReportedId as Any,
             "download": downloadStatus(),
         ]
         result["current"] = store.active.map(describe) as Any
@@ -133,6 +148,12 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
         call.resolve()
     }
 
+    @objc func acknowledgeReady(_ call: CAPPluginCall) {
+        guard let id = call.getString("id") else { return call.reject("id is required") }
+        store.readyReportedId = id
+        call.resolve()
+    }
+
     @objc func identity(_ call: CAPPluginCall) {
         let info = Bundle.main.infoDictionary
         call.resolve([
@@ -146,6 +167,7 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
             "embeddedAt": getConfig().getString("embeddedAt", "") ?? "",
             "nativeBuild": Self.nativeBuild(),
             "appVersion": info?["CFBundleShortVersionString"] as? String ?? "",
+            "osVersion": Self.osVersion(),
         ])
     }
 
@@ -177,20 +199,28 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
     /// the same URL produces the same wrong bytes, and retrying forever is
     /// how a device burns a data plan on nothing.
     @objc func retry(_ call: CAPPluginCall) {
-        guard let previous = lastFailed else { return call.reject("nothing to retry") }
-        if let failure, failure["retryable"] as? Bool == false {
+        let (last, lastFailure) = locked { (lastFailed, failure) }
+        guard let previous = last else { return call.reject("nothing to retry") }
+        if let lastFailure, lastFailure["retryable"] as? Bool == false {
             return call.reject("the last failure is not retryable: "
-                               + (failure["message"] as? String ?? ""))
+                               + (lastFailure["message"] as? String ?? ""))
         }
         start(previous, call)
     }
 
     private func start(_ pending: Pending, _ call: CAPPluginCall) {
-        guard downloading == nil else { return call.reject("a download is already running") }
-        downloading = pending
-        failure = nil
-        bytes = 0
-        total = 0
+        let started: Bool = locked {
+            guard downloading == nil else { return false }
+            downloading = pending
+            failure = nil
+            bytes = 0
+            total = 0
+            // Armed here, not in the Task: a cancel from now on is honoured
+            // even before the request exists.
+            bundles.begin()
+            return true
+        }
+        guard started else { return call.reject("a download is already running") }
         emit(state: "DOWNLOADING", id: pending.id)
 
         Task {
@@ -199,9 +229,12 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
                     id: pending.id, url: pending.url, expected: pending.checksum,
                     progress: { [weak self] phase, read, length in
                         guard let self else { return }
-                        self.bytes = read
-                        self.total = length
-                        if phase != self.state {
+                        let changed: Bool = self.locked {
+                            self.bytes = read
+                            self.total = length
+                            return phase != self.state
+                        }
+                        if changed {
                             self.emit(state: phase, id: pending.id)
                         } else {
                             self.emitProgress(pending.id)
@@ -211,22 +244,26 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
                 let record = BundleRecord(id: pending.id, version: pending.version,
                                           path: directory.path, checksum: pending.checksum,
                                           size: size, nativeBuild: Self.nativeBuild())
-                downloading = nil
-                lastFailed = nil
+                locked {
+                    downloading = nil
+                    lastFailed = nil
+                }
                 emit(state: "READY", id: pending.id)
                 call.resolve(describe(record))
             } catch {
-                downloading = nil
-                lastFailed = pending
                 let wasCancelled = (error as? Bundles.Failure).map(Self.isCancelled) ?? false
-                failure = [
-                    "id": pending.id,
-                    "code": Self.code(for: error),
-                    "message": error.localizedDescription,
-                    // A digest mismatch or an unusable archive is deterministic:
-                    // the same URL will produce the same bytes. Matches Android.
-                    "retryable": !wasCancelled && !["digest", "unpack"].contains(Self.code(for: error)),
-                ]
+                locked {
+                    downloading = nil
+                    lastFailed = pending
+                    failure = [
+                        "id": pending.id,
+                        "code": Self.code(for: error),
+                        "message": error.localizedDescription,
+                        // A digest mismatch or an unusable archive is deterministic:
+                        // the same URL will produce the same bytes. Matches Android.
+                        "retryable": !wasCancelled && !["digest", "unpack"].contains(Self.code(for: error)),
+                    ]
+                }
                 emit(state: wasCancelled ? "CANCELLED" : "FAILED", id: pending.id)
                 call.reject(error.localizedDescription, nil, error)
             }
@@ -252,6 +289,11 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     private func downloadStatus() -> [String: Any] {
+        locked { statusFields() }
+    }
+
+    /// The caller holds the lock.
+    private func statusFields() -> [String: Any] {
         [
             "id": downloading?.id ?? lastFailed?.id ?? "",
             "state": state,
@@ -269,16 +311,19 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     private func emit(state next: String, id: String) {
-        state = next
-        notifyListeners("downloadStateChanged", data: downloadStatus())
+        let status: [String: Any] = locked {
+            state = next
+            return statusFields()
+        }
+        notifyListeners("downloadStateChanged", data: status)
         if next == "DOWNLOADING" { emitProgress(id) }
     }
 
     private func emitProgress(_ id: String) {
-        notifyListeners("downloadProgress", data: [
-            "id": id, "state": state, "bytes": bytes,
-            "total": total, "fraction": fraction(),
-        ])
+        let progress: [String: Any] = locked {
+            ["id": id, "state": state, "bytes": bytes, "total": total, "fraction": fraction()]
+        }
+        notifyListeners("downloadProgress", data: progress)
     }
 
     /// Serve the staged bundle NOW, reloading the webview into it.
@@ -336,11 +381,14 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
         store.pending = false
         // The update has landed. Without this the state machine still reads
         // READY after the swap, and the app offers an update it just applied.
-        state = "IDLE"
-        bytes = 0
-        total = 0
-        failure = nil
-        notifyListeners("downloadStateChanged", data: downloadStatus())
+        let status: [String: Any] = locked {
+            state = "IDLE"
+            bytes = 0
+            total = 0
+            failure = nil
+            return statusFields()
+        }
+        notifyListeners("downloadStateChanged", data: status)
         call.resolve()
     }
 
@@ -366,7 +414,9 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
         store.next = nil
         store.pending = false
         let target = store.active
-        call.resolve(["rolledBackTo": target?.version ?? "embedded"])
+        // A record staged before next() carried the version names itself by id.
+        let name = target.map { $0.version.isEmpty ? $0.id : $0.version } ?? "embedded"
+        call.resolve(["rolledBackTo": name])
         DispatchQueue.main.async { [weak self] in
             self?.serve(target?.path ?? Self.embeddedPath())
         }
@@ -432,6 +482,14 @@ public class OverairPlugin: CAPPlugin, CAPBridgedPlugin {
             "checksum": record.checksum,
             "status": status,
         ]
+    }
+
+    /// What UIDevice.systemVersion says ("17.5.1", "18.0"), read from
+    /// ProcessInfo because UIDevice belongs to the main thread and this does not.
+    private static func osVersion() -> String {
+        let version = ProcessInfo.processInfo.operatingSystemVersion
+        let base = "\(version.majorVersion).\(version.minorVersion)"
+        return version.patchVersion > 0 ? "\(base).\(version.patchVersion)" : base
     }
 
     /// CFBundleVersion, not the marketing version: two builds ship the same

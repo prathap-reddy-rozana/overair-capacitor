@@ -43,6 +43,81 @@ var capacitorOverair = (function (exports, core) {
         }
     }
 
+    /**
+     * The server's caps on what a device sends, applied before it is sent.
+     *
+     * Over any of them the server refuses the WHOLE request with a 400, and a
+     * check that fails reads as offline - so one oversized attribute switched
+     * updates off for that device for good, and nothing said so.
+     */
+    /** Longest value the server accepts for each string field of a check. */
+    const FIELD_LIMITS = {
+        runtime: 80,
+        channel: 80,
+        app_version: 80,
+        build_number: 40,
+        os_version: 40,
+        locale: 20,
+        custom_id: 200,
+    };
+    /** `attrs`, and an event's `detail`, serialised. */
+    const MAX_JSON_BYTES = 4096;
+    /** Where a trimmed `detail` stops: under the cap with room to spare. */
+    const DETAIL_TARGET = 4000;
+    /**
+     * The length of `value` as the server measures it: Python's `json.dumps` with
+     * `separators=(',', ':')`, which is compact like `JSON.stringify` but escapes
+     * every non-ASCII code unit as `\uXXXX` (six bytes). Counting a space after
+     * each separator dropped `attrs` the server would have accepted.
+     */
+    function jsonSize(value) {
+        const json = JSON.stringify(value) ?? '';
+        let size = 0;
+        for (let i = 0; i < json.length; i += 1)
+            size += json.charCodeAt(i) > 0x7f ? 6 : 1;
+        return size;
+    }
+    /** A check the server will not refuse for its size. */
+    function capCheck(request, log) {
+        const capped = { ...request };
+        for (const [field, limit] of Object.entries(FIELD_LIMITS)) {
+            const key = field;
+            const value = capped[key];
+            if (typeof value === 'string' && value.length > limit) {
+                log(`${key} is ${value.length} characters; sending the first ${limit}`);
+                capped[key] = value.slice(0, limit);
+            }
+        }
+        // Dropped whole: a truncated attribute set would target on half the facts.
+        if (capped.attrs && jsonSize(capped.attrs) > MAX_JSON_BYTES) {
+            log(`attrs is ${jsonSize(capped.attrs)} bytes, over ${MAX_JSON_BYTES}; sending none`);
+            capped.attrs = {};
+        }
+        return capped;
+    }
+    /** An event detail the server will not refuse: the message is shortened
+     *  until it fits, and a detail that still does not is replaced. */
+    function capDetail(detail) {
+        if (jsonSize(detail) <= DETAIL_TARGET)
+            return detail;
+        const message = typeof detail['message'] === 'string' ? detail['message'] : null;
+        if (message !== null) {
+            let low = 0;
+            let high = message.length;
+            while (low < high) {
+                const mid = Math.ceil((low + high) / 2);
+                if (jsonSize({ ...detail, message: message.slice(0, mid) }) <= DETAIL_TARGET)
+                    low = mid;
+                else
+                    high = mid - 1;
+            }
+            const trimmed = { ...detail, message: message.slice(0, low) };
+            if (jsonSize(trimmed) <= DETAIL_TARGET)
+                return trimmed;
+        }
+        return { truncated: true };
+    }
+
     /** The native plugin. Use it directly for status and manual control; most
      *  apps want `Updater` below instead. */
     const Overair = core.registerPlugin('Overair', {
@@ -60,11 +135,14 @@ var capacitorOverair = (function (exports, core) {
      * Keyed on the bundle id rather than a flag: agreeing to one large update is
      * not agreeing to the next one.
      */
-    function shouldDefer(update, acceptedId) {
+    function shouldDefer(update, acceptedId, stoppedId = null) {
         if (update.mandatory)
             return false;
         if (update.bundle_id === acceptedId)
             return false;
+        // Stopped by the person: whatever its size, it waits to be asked for again.
+        if (update.bundle_id === stoppedId)
+            return true;
         return update.auto_max_bytes > 0 && update.size > update.auto_max_bytes;
     }
     /** A time the server can read, or null. Anything else is dropped here rather
@@ -82,8 +160,21 @@ var capacitorOverair = (function (exports, core) {
     /** How many pre-endpoint events to hold. One launch raises at most a couple;
      *  the cap only matters for a build that never syncs at all. */
     const QUEUED_EVENT_LIMIT = 20;
-    /** Longest failure message reported; keeps an event under the server's cap. */
+    /** Longest failure message reported. The server's cap is in bytes, and
+     *  `capDetail` is what keeps a non-ASCII message under it. */
     const MAX_MESSAGE = 1000;
+    /** How long a report may hold up a rollback or reset. */
+    const REPORT_BEFORE_RELOAD_MS = 3000;
+    /** Wait for `work`, but never past `ms`: a dead network must not be why a
+     *  broken bundle stays on screen. */
+    function bounded(work, ms) {
+        let timer;
+        const limit = new Promise((resolve) => { timer = setTimeout(resolve, ms); });
+        return Promise.race([work.then(() => undefined, () => undefined), limit])
+            .finally(() => clearTimeout(timer));
+    }
+    /** Native's refusal of a second concurrent download, word for word. */
+    const ALREADY_RUNNING = 'a download is already running';
     /**
      * The protocol half of the SDK.
      *
@@ -100,18 +191,22 @@ var capacitorOverair = (function (exports, core) {
         /** The bundle the user has already said yes to. Per bundle id, not a flag:
          *  agreeing to one large update is not agreeing to the next one. */
         acceptedId = null;
+        /** The bundle the person stopped, deferred until they accept it. Without it
+         *  a bundle under the ceiling was downloaded again by the next check. */
+        stoppedId = null;
         /**
          * Events raised before an endpoint was known.
          *
-         * `notifyReady` runs BEFORE the first sync on purpose - the watchdog has to
-         * be satisfied before a check can overtake it - so the READY it emits has
-         * nowhere to go yet. `this.api?.report(...)` turned that into a silent
-         * no-op, which left `ready` at zero for every real fleet while
-         * `pause_below_ready_bps` was reading exactly that number.
+         * `this.api?.report(...)` once made these a silent no-op, which left
+         * `ready` at zero for every real fleet while `pause_below_ready_bps` was
+         * reading exactly that number. READY itself now waits in `confirmed`, so
+         * it can be acknowledged once the server has it; this holds the rest.
          */
         queued = [];
         /** The rollback already sent, so notifyReady and sync never both send it. */
         rollbackReported = null;
+        /** The bundle this launch confirmed, until the server has its READY. */
+        confirmed = null;
         /** Every sync's answer goes here, whoever asked - the app, or a resume. */
         listeners = new Set();
         resumeListener = null;
@@ -210,8 +305,32 @@ var capacitorOverair = (function (exports, core) {
             await Overair.notifyReady();
             const status = await Overair.status();
             await this.reportRollback(status);
-            if (status.current)
-                await this.emit('READY', status.current.id);
+            this.confirmed = status.current?.id ?? null;
+            await this.reportReady(status);
+        }
+        /**
+         * READY once per install per bundle, not once per launch: the server keeps
+         * every one, and a device that launches ten times a day counted ten times
+         * in the health gate. Held until the endpoint is known, and acknowledged
+         * only once the server has it, so an offline launch sends it later.
+         */
+        async reportReady(status) {
+            const id = this.confirmed;
+            if (!id || !this.api)
+                return;
+            if (id === status.readyReportedId) {
+                this.confirmed = null;
+                return;
+            }
+            if (!(await this.emit('READY', id)))
+                return;
+            this.confirmed = null;
+            try {
+                await Overair.acknowledgeReady({ id });
+            }
+            catch {
+                // At worst the next launch sends it once more.
+            }
         }
         /**
          * A rollback happens natively, before any JavaScript exists to see it.
@@ -290,6 +409,7 @@ var capacitorOverair = (function (exports, core) {
             // Remembered BEFORE the check, so the ceiling does not defer the very
             // bundle this call is agreeing to (and `retry` can take it later).
             this.acceptedId = manifest.bundle_id;
+            this.stoppedId = null;
             this.accepting = (async () => {
                 // A check already running started before the consent; its answer is
                 // "deferred", so wait it out and ask again.
@@ -337,18 +457,25 @@ var capacitorOverair = (function (exports, core) {
          */
         async rollback() {
             const status = await Overair.status();
-            const result = await Overair.rollback();
-            if (status.current)
-                await this.emit('FAILED', status.current.id, 'app_reported');
-            // No bundle: the server quarantines the bundle an event names, and the
-            // previous one is where this device is going, not what failed.
-            await this.emit('REVERTED');
-            return result;
+            // Nothing to report: native refuses, as it always has.
+            if (!status.current)
+                return Overair.rollback();
+            const failed = status.current.id;
+            // Sent FIRST. Native reloads the webview as it resolves, and events
+            // raised after it went down with this JavaScript context.
+            await bounded((async () => {
+                await this.emit('FAILED', failed, 'app_reported');
+                // No bundle: the server quarantines the bundle an event names, and the
+                // previous one is where this device is going, not what failed.
+                await this.emit('REVERTED');
+            })(), REPORT_BEFORE_RELOAD_MS);
+            return Overair.rollback();
         }
         /** Back to the build compiled into the binary, forgetting the rest. */
         async reset() {
+            // Before, for the reason rollback() gives.
+            await bounded(this.emit('REVERTED'), REPORT_BEFORE_RELOAD_MS);
             await Overair.reset();
-            await this.emit('REVERTED');
         }
         async run() {
             const idle = {
@@ -365,23 +492,26 @@ var capacitorOverair = (function (exports, core) {
             await this.flushQueued();
             const status = await Overair.status();
             await this.reportRollback(status);
+            await this.reportReady(status);
             let response;
             try {
-                response = await this.api.check({
+                // Capped here: over any server limit the whole check is refused, and a
+                // refused check reads as offline, forever.
+                response = await this.api.check(capCheck({
                     install_id: identity.installId,
                     platform: core.Capacitor.getPlatform(),
                     runtime: this.options.runtime || identity.runtime,
                     channel: this.options.channel || identity.channel,
                     app_version: identity.appVersion,
                     build_number: identity.nativeBuild,
-                    os_version: '',
+                    os_version: identity.osVersion ?? '',
                     locale: typeof navigator !== 'undefined' ? navigator.language : '',
                     custom_id: this.options.customId ?? '',
                     attrs: this.options.attrs ?? {},
                     current_bundle: status.current?.id ?? '',
                     embedded_at: embeddedTime(this.options.embeddedAt || identity.embeddedAt),
                     quarantined: status.quarantined,
-                });
+                }, (message) => this.log(message)));
             }
             catch (error) {
                 // Offline is the normal case, not an error worth surfacing: the app
@@ -391,8 +521,8 @@ var capacitorOverair = (function (exports, core) {
             }
             this.log(`check -> ${response.reason}`);
             if (response.revert) {
+                await bounded(this.emit('REVERTED'), REPORT_BEFORE_RELOAD_MS);
                 await Overair.reset();
-                await this.emit('REVERTED');
                 return {
                     reason: response.reason, staged: false, deferred: null, reverted: true, update: null,
                 };
@@ -401,7 +531,7 @@ var capacitorOverair = (function (exports, core) {
             this.deferred = null;
             if (!update)
                 return { ...idle, reason: response.reason };
-            if (shouldDefer(update, this.acceptedId)) {
+            if (shouldDefer(update, this.acceptedId, this.stoppedId)) {
                 this.log(`deferred ${update.version}: ${update.size} over ${update.auto_max_bytes}`);
                 this.deferred = update;
                 return {
@@ -423,14 +553,21 @@ var capacitorOverair = (function (exports, core) {
         async stage(update, reason, installId) {
             await this.emit('DOWNLOAD_STARTED', update.bundle_id);
             try {
-                await Overair.download({
+                const downloaded = await Overair.download({
                     id: update.bundle_id,
                     version: update.version,
                     url: update.url,
                     checksum: update.sha256,
                 });
                 await this.emit('DOWNLOADED', update.bundle_id);
-                await Overair.next({ id: update.bundle_id });
+                // Named in full: with only the id, every record read version "" and a
+                // rollback reported it had gone back to "".
+                await Overair.next({
+                    id: update.bundle_id,
+                    version: update.version,
+                    checksum: update.sha256,
+                    size: downloaded?.size ?? update.size,
+                });
                 await this.emit('APPLIED', update.bundle_id);
                 this.log(`staged ${update.version}; it runs on the next launch`);
                 this.deferred = null;
@@ -439,9 +576,27 @@ var capacitorOverair = (function (exports, core) {
             }
             catch (error) {
                 const message = error.message;
+                // First: native refused before touching its failure record, so what
+                // that record says belongs to an earlier attempt.
+                if (message.includes(ALREADY_RUNNING)) {
+                    // Another download holds native; this one never started.
+                    this.log(`${update.version} not started: ${message}`);
+                    return { reason, staged: false, deferred: null, reverted: false, update };
+                }
+                const code = await this.failureCode(update.bundle_id);
+                if (code === 'cancelled') {
+                    // The person said stop. Not a failure of the release: reported as
+                    // one, three taps on Stop quarantined it server-side. The consent is
+                    // spent, and the manifest is offered back so they can say yes again.
+                    this.log(`${update.version} cancelled`);
+                    this.acceptedId = null;
+                    this.stoppedId = update.bundle_id;
+                    this.deferred = update;
+                    return { reason, staged: false, deferred: update, reverted: false, update };
+                }
                 this.log(`staging failed: ${message}`);
                 const detail = { message: message.slice(0, MAX_MESSAGE), installId };
-                if (await this.unusable(update.bundle_id)) {
+                if (code === 'unpack' || code === 'digest') {
                     // The same URL gives the same bytes: a digest mismatch or an archive
                     // that cannot run here. Refused on this device and on the server.
                     try {
@@ -455,19 +610,20 @@ var capacitorOverair = (function (exports, core) {
                 else {
                     // NOT quarantined: a download or disk failure, not a bundle that
                     // cannot run. Refusing it forever would refuse bytes never tried.
-                    // Capped: the server refuses an event whose detail is over 4 KB.
                     await this.emit('FAILED', update.bundle_id, 'stage_failed', detail);
                 }
                 return { reason, staged: false, deferred: null, reverted: false, update };
             }
         }
-        async unusable(id) {
+        /** Why native says this bundle's download ended, or null when it has not
+         *  recorded a failure for it. */
+        async failureCode(id) {
             try {
                 const { failure } = (await Overair.status()).download;
-                return failure?.id === id && (failure.code === 'unpack' || failure.code === 'digest');
+                return failure?.id === id ? failure.code : null;
             }
             catch {
-                return false;
+                return null;
             }
         }
         /** Telemetry never makes a device wait, and a failed report must never
@@ -481,7 +637,7 @@ var capacitorOverair = (function (exports, core) {
                     type,
                     bundle: bundle ?? '',
                     error_code: errorCode ?? '',
-                    detail: detail ?? {},
+                    detail: capDetail(detail ?? {}),
                 };
                 if (!this.api) {
                     // Held, not dropped. Bounded, because a build with OTA switched off
@@ -535,7 +691,7 @@ var capacitorOverair = (function (exports, core) {
         async status() {
             return {
                 current: null, next: null, previous: null, quarantined: [],
-                rolledBack: false, rolledBackId: null,
+                rolledBack: false, rolledBackId: null, readyReportedId: null,
                 download: this.idle(),
             };
         }
@@ -543,6 +699,9 @@ var capacitorOverair = (function (exports, core) {
             return { id: '', state: 'IDLE', bytes: 0, total: 0, fraction: -1, failure: null };
         }
         async acknowledgeRollback() {
+            return;
+        }
+        async acknowledgeReady(_options) {
             return;
         }
         async identity() {
@@ -553,6 +712,7 @@ var capacitorOverair = (function (exports, core) {
                 nativeBuild: '',
                 embeddedAt: '',
                 appVersion: '',
+                osVersion: '',
                 apiUrl: '',
                 apiKey: '',
             };

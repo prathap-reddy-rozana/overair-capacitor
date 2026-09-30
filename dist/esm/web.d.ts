@@ -1,5 +1,5 @@
 import { WebPlugin } from '@capacitor/core';
-import type { BundleInfo, DownloadOptions, OverairIdentity, OverairPlugin, OverairStatus } from './definitions';
+import type { BundleInfo, DownloadOptions, NextOptions, OverairIdentity, OverairPlugin, OverairStatus } from './definitions';
 /**
  * The web implementation, which deliberately does nothing.
  *
@@ -13,11 +13,12 @@ export declare class OverairWeb extends WebPlugin implements OverairPlugin {
     status(): Promise<OverairStatus>;
     private idle;
     acknowledgeRollback(): Promise<void>;
-    identity(): Promise<OverairIdentity>;
-    download(_options: DownloadOptions): Promise<BundleInfo>;
-    next(_options: {
+    acknowledgeReady(_options: {
         id: string;
     }): Promise<void>;
+    identity(): Promise<OverairIdentity>;
+    download(_options: DownloadOptions): Promise<BundleInfo>;
+    next(_options: NextOptions): Promise<void>;
     applyNow(): Promise<void>;
     cancel(): Promise<void>;
     retry(): Promise<BundleInfo>;

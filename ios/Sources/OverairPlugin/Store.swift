@@ -22,6 +22,7 @@ public final class Store {
         static let pending = "overair.pending"
         static let bad = "overair.quarantined"
         static let rolledBack = "overair.rolled_back"
+        static let readyReported = "overair.ready_reported"
     }
 
     /// Generated once and kept forever. Deliberately not a device identifier:
@@ -67,6 +68,13 @@ public final class Store {
     public var rolledBackId: String? {
         get { defaults.string(forKey: Key.rolledBack) }
         set { defaults.set(newValue, forKey: Key.rolledBack) }
+    }
+
+    /// The last bundle the server accepted a READY for. Only the last: one
+    /// READY per bundle this install runs, not one per launch of it.
+    public var readyReportedId: String? {
+        get { defaults.string(forKey: Key.readyReported) }
+        set { defaults.set(newValue, forKey: Key.readyReported) }
     }
 
     public var quarantined: [String] {

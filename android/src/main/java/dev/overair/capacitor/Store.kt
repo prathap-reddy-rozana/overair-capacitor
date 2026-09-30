@@ -84,6 +84,12 @@ class Store(context: Context) {
         get() = prefs.getString(ROLLED_BACK, null)
         set(value) = prefs.edit().putString(ROLLED_BACK, value).apply()
 
+    /** The last bundle the server accepted a READY for. Only the last: one
+     *  READY per bundle this install runs, not one per launch of it. */
+    var readyReportedId: String?
+        get() = prefs.getString(READY_REPORTED, null)
+        set(value) = prefs.edit().putString(READY_REPORTED, value).apply()
+
     fun quarantined(): List<String> {
         val raw = prefs.getString(BAD, null) ?: return emptyList()
         return runCatching {
@@ -129,5 +135,6 @@ class Store(context: Context) {
         const val PENDING = "pending"
         const val BAD = "quarantined"
         const val ROLLED_BACK = "rolled_back"
+        const val READY_REPORTED = "ready_reported"
     }
 }

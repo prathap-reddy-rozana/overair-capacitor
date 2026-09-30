@@ -46,4 +46,12 @@ describe('shouldDefer', () => {
     // Agreeing to one large update is not agreeing to the next one.
     expect(shouldDefer(manifest({ bundle_id: '27' }), '26')).toBe(true);
   });
+
+  it('waits for a bundle the person stopped, whatever its size', () => {
+    expect(shouldDefer(manifest({ bundle_id: '26', size: 500_000 }), null, '26')).toBe(true);
+  });
+
+  it('still downloads a stopped bundle that is mandatory', () => {
+    expect(shouldDefer(manifest({ bundle_id: '26', mandatory: true }), null, '26')).toBe(false);
+  });
 });

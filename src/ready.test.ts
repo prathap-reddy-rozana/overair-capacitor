@@ -13,6 +13,9 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+/** What native says the server last accepted a READY for. */
+let reported: string | null = null;
+
 const native = {
   identity: vi.fn(async () => ({
     installId: 'i-1',
@@ -28,8 +31,10 @@ const native = {
     rolledBack: false,
     rolledBackId: null,
     quarantined: [] as string[],
+    readyReportedId: reported,
   })),
   notifyReady: vi.fn(async () => undefined),
+  acknowledgeReady: vi.fn(async (_: { id: string }) => undefined),
   download: vi.fn(async () => undefined),
 };
 
@@ -63,6 +68,7 @@ describe('READY survives being raised before the endpoint exists', () => {
     native.identity.mockClear();
     native.status.mockClear();
     native.notifyReady.mockClear();
+    native.acknowledgeReady.mockClear();
   });
 
   afterEach(() => {
@@ -125,5 +131,57 @@ describe('READY survives being raised before the endpoint exists', () => {
 
     const queued = (OverairUpdater as unknown as { queued: unknown[] }).queued;
     expect(queued.length).toBeLessThanOrEqual(20);
+  });
+});
+
+describe('READY is sent once per bundle, not once per launch', () => {
+  const OPTIONS = { apiUrl: 'https://o.example.com', apiKey: 'oa_client_x' };
+
+  beforeEach(() => {
+    vi.resetModules();
+    reported = null;
+    native.status.mockClear();
+    native.acknowledgeReady.mockClear();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('records the bundle once the server has it', async () => {
+    captureFetch(UP_TO_DATE);
+    const { OverairUpdater } = await import('./index');
+
+    await OverairUpdater.notifyReady();
+    await OverairUpdater.sync(OPTIONS);
+
+    expect(native.acknowledgeReady).toHaveBeenCalledWith({ id: '42' });
+  });
+
+  it('sends nothing for a bundle already reported', async () => {
+    // The server stores every READY, so a device that launches ten times a
+    // day was counted ten times in the health gate's READY ratio.
+    reported = '42';
+    const calls = captureFetch(UP_TO_DATE);
+    const { OverairUpdater } = await import('./index');
+
+    await OverairUpdater.notifyReady();
+    await OverairUpdater.sync(OPTIONS);
+
+    expect(readyEvents(calls)).toHaveLength(0);
+    expect(native.acknowledgeReady).not.toHaveBeenCalled();
+  });
+
+  it('is not recorded while offline, so a later launch sends it', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url.endsWith('/v1/events')) throw new TypeError('offline');
+      return { ok: true, status: 200, json: async () => UP_TO_DATE };
+    }) as unknown as typeof fetch);
+    const { OverairUpdater } = await import('./index');
+
+    await OverairUpdater.notifyReady();
+    await OverairUpdater.sync(OPTIONS);
+
+    expect(native.acknowledgeReady).not.toHaveBeenCalled();
   });
 });

@@ -74,6 +74,11 @@ public struct BootDecision {
     public let forget: Bool
     /// Refuse this bundle forever - it was given a launch and never returned.
     public let markBad: String?
+    /// What the store holds after this launch. A failed active bundle hands
+    /// over to its predecessor, which becomes the confirmed current one.
+    public var active: BundleRecord?
+    public var next: BundleRecord?
+    public var previous: BundleRecord?
 
     public var isFirstBoot: Bool { because == .firstBoot }
 }
@@ -91,6 +96,7 @@ public enum Boot {
 
         var active = facts.active
         var next = facts.next
+        var previous = facts.previous
         var markBad: String?
 
         // Pending means the previous launch served a bundle and it never
@@ -102,14 +108,20 @@ public enum Boot {
             // The bundle that failed WAS the active one, so step back to its
             // predecessor rather than throwing away every update this device
             // ever took. Embedded is the floor, not the first resort.
-            if let bad = markBad, active?.id == bad { active = facts.previous }
+            // Promoted, not just served: left in `previous`, the next launch
+            // found no active bundle and went to embedded after all.
+            if let bad = markBad, active?.id == bad {
+                active = previous
+                previous = nil
+            }
         }
 
         // A bundle that has never started goes first. One launch is what it
         // gets to prove itself.
         if let staged = next {
             return BootDecision(run: .bundle, because: .firstBoot,
-                                record: staged, forget: false, markBad: markBad)
+                                record: staged, forget: false, markBad: markBad,
+                                active: active, next: staged, previous: previous)
         }
 
         // Falling back to the last CONFIRMED bundle rather than all the way
@@ -117,11 +129,13 @@ public enum Boot {
         // their most recent working update instead of losing every one.
         if let current = active {
             return BootDecision(run: .bundle, because: .confirmed,
-                                record: current, forget: false, markBad: markBad)
+                                record: current, forget: false, markBad: markBad,
+                                active: current, next: nil, previous: previous)
         }
 
         return BootDecision(run: .embedded,
                             because: markBad != nil ? .failedBoot : .noBundle,
-                            record: nil, forget: false, markBad: markBad)
+                            record: nil, forget: false, markBad: markBad,
+                            previous: previous)
     }
 }

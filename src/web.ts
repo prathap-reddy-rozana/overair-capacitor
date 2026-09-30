@@ -1,7 +1,8 @@
 import { WebPlugin } from '@capacitor/core';
 
 import type {
-  BundleInfo, DownloadOptions, DownloadStatus, OverairIdentity, OverairPlugin, OverairStatus,
+  BundleInfo, DownloadOptions, DownloadStatus, NextOptions, OverairIdentity, OverairPlugin,
+  OverairStatus,
 } from './definitions';
 
 /**
@@ -18,7 +19,7 @@ export class OverairWeb extends WebPlugin implements OverairPlugin {
   async status(): Promise<OverairStatus> {
     return {
       current: null, next: null, previous: null, quarantined: [],
-      rolledBack: false, rolledBackId: null,
+      rolledBack: false, rolledBackId: null, readyReportedId: null,
       download: this.idle(),
     };
   }
@@ -31,6 +32,10 @@ export class OverairWeb extends WebPlugin implements OverairPlugin {
     return;
   }
 
+  async acknowledgeReady(_options: { id: string }): Promise<void> {
+    return;
+  }
+
   async identity(): Promise<OverairIdentity> {
     return {
       installId: 'web',
@@ -39,6 +44,7 @@ export class OverairWeb extends WebPlugin implements OverairPlugin {
       nativeBuild: '',
       embeddedAt: '',
       appVersion: '',
+      osVersion: '',
       apiUrl: '',
       apiKey: '',
     };
@@ -48,7 +54,7 @@ export class OverairWeb extends WebPlugin implements OverairPlugin {
     throw this.unavailable('Bundles are only downloaded on a device.');
   }
 
-  async next(_options: { id: string }): Promise<void> {
+  async next(_options: NextOptions): Promise<void> {
     throw this.unavailable('Bundles are only applied on a device.');
   }
 
