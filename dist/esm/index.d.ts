@@ -1,5 +1,5 @@
 import type { DownloadProgress, DownloadStatus, OverairPlugin } from './definitions';
-import type { Manifest, Reason } from './types';
+import type { AppIdentity, Manifest, Reason } from './types';
 export * from './definitions';
 export * from './types';
 /** The native plugin. Use it directly for status and manual control; most
@@ -120,6 +120,13 @@ declare class Updater {
      * one is running joins the first rather than starting a second download.
      */
     sync(options?: UpdaterOptions): Promise<SyncResult>;
+    /**
+     * Who is using the app, sent with every check until it changes - including
+     * the first check of the next launch, which runs before the app knows who
+     * is signed in. `null` forgets it. The `customId` and `attrs` options still
+     * win when the app sets them.
+     */
+    setIdentity(identity: AppIdentity | null): void;
     /** Change options without checking - e.g. switching resume checks off
      *  from remote config. */
     configure(options: UpdaterOptions): void;

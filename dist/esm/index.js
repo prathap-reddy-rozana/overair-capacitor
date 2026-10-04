@@ -35,6 +35,18 @@ export function shouldDefer(update, acceptedId, stoppedId = null) {
 export function embeddedTime(value) {
     return value && !Number.isNaN(Date.parse(value)) ? value : null;
 }
+/** Where the app's identity waits between launches. Web storage, so this ships
+ *  with the bundle and reaches installed apps without a store release. */
+const IDENTITY_KEY = 'overair.identity';
+function storedIdentity() {
+    try {
+        const raw = globalThis.localStorage?.getItem(IDENTITY_KEY);
+        return raw ? JSON.parse(raw) : null;
+    }
+    catch {
+        return null;
+    }
+}
 const NO_ANSWER = {
     reason: 'CHECKED', staged: false, deferred: null, reverted: false, update: null,
 };
@@ -119,6 +131,28 @@ class Updater {
         })
             .finally(() => { this.inFlight = null; });
         return this.inFlight;
+    }
+    /**
+     * Who is using the app, sent with every check until it changes - including
+     * the first check of the next launch, which runs before the app knows who
+     * is signed in. `null` forgets it. The `customId` and `attrs` options still
+     * win when the app sets them.
+     */
+    setIdentity(identity) {
+        try {
+            if (identity) {
+                globalThis.localStorage?.setItem(IDENTITY_KEY, JSON.stringify({
+                    customId: identity.customId ?? '', attrs: identity.attrs ?? {},
+                }));
+            }
+            else {
+                globalThis.localStorage?.removeItem(IDENTITY_KEY);
+            }
+        }
+        catch (error) {
+            // Storage refused (private mode, quota): the check goes out anonymous.
+            this.log(`identity not stored: ${error.message}`);
+        }
     }
     /** Change options without checking - e.g. switching resume checks off
      *  from remote config. */
@@ -378,6 +412,7 @@ class Updater {
         const status = await Overair.status();
         await this.reportRollback(status);
         await this.reportReady(status);
+        const remembered = storedIdentity();
         let response;
         try {
             // Capped here: over any server limit the whole check is refused, and a
@@ -391,8 +426,8 @@ class Updater {
                 build_number: identity.nativeBuild,
                 os_version: identity.osVersion ?? '',
                 locale: typeof navigator !== 'undefined' ? navigator.language : '',
-                custom_id: this.options.customId ?? '',
-                attrs: this.options.attrs ?? {},
+                custom_id: this.options.customId ?? remembered?.customId ?? '',
+                attrs: this.options.attrs ?? remembered?.attrs ?? {},
                 current_bundle: status.current?.id ?? '',
                 embedded_at: embeddedTime(this.options.embeddedAt || identity.embeddedAt),
                 quarantined: status.quarantined,

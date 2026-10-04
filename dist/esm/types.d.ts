@@ -8,6 +8,13 @@
 export type Platform = 'android' | 'ios' | 'web';
 /** Every outcome the server can report, including every refusal. */
 export type Reason = 'CHECKED' | 'OFFERED' | 'UP_TO_DATE' | 'CONFIG_ERROR' | 'HELD_RUNTIME' | 'HELD_TARGETING' | 'HELD_ROLLOUT' | 'HELD_QUARANTINE' | 'HELD_CHANNEL' | 'HELD_PAUSED' | 'HELD_BLOCKED' | 'HELD_OLDER_THAN_EMBEDDED' | 'DOWNLOAD_STARTED' | 'DOWNLOADED' | 'APPLIED' | 'READY' | 'FAILED' | 'REVERTED' | 'REVERT_TO_EMBEDDED';
+/** Who is using the app, as the app's own vocabulary. Sent with every check;
+ *  release rules can name `custom_id` and anything under `attrs.`. Rules
+ *  compare exactly and the console saves text, so send values as text. */
+export interface AppIdentity {
+    customId?: string;
+    attrs?: Record<string, unknown>;
+}
 export interface CheckRequest {
     install_id: string;
     platform: Platform;
