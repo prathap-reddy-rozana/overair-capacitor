@@ -165,6 +165,33 @@ built from older code than its time says, it is held back from releases it
 should get. Target the override at that build (a Remote Config condition on the
 build number), not every build. A value that is not a time is sent as null.
 
+## Who is using the app
+
+A release can be aimed at people as well as builds: a rule on `custom_id` names
+users, and rules on `attrs.*` name roles, regions, anything your app knows.
+Tell the plugin who is signed in whenever that changes:
+
+```ts
+// On login, and on any change a rule might read.
+OverairUpdater.setIdentity({
+  customId: String(user.id),
+  attrs: { role: user.role, region: user.region, signed_in: 'yes' },
+});
+
+// On logout. Keep what is not personal, so a signed-out phone can still be aimed at.
+OverairUpdater.setIdentity({ attrs: { signed_in: 'no' } });
+```
+
+It is stored and sent with every check until it changes, including the first
+check of the next launch, which runs before your app knows who is signed in.
+`setIdentity(null)` forgets it. The `customId` and `attrs` options on `sync()`
+still win when you set them.
+
+**Send values as text.** Rules compare exactly and the console saves text, so a
+user id sent as the number `42` never matches a rule listing `42`. A device that
+sends no `custom_id` never matches a rule on it, so a fix for a signed-out screen
+must not be aimed at users.
+
 ## Progress, cancel, retry
 
 ```ts

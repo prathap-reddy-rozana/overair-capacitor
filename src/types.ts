@@ -17,6 +17,14 @@ export type Reason =
   | 'DOWNLOAD_STARTED' | 'DOWNLOADED' | 'APPLIED' | 'READY'
   | 'FAILED' | 'REVERTED' | 'REVERT_TO_EMBEDDED';
 
+/** Who is using the app, as the app's own vocabulary. Sent with every check;
+ *  release rules can name `custom_id` and anything under `attrs.`. Rules
+ *  compare exactly and the console saves text, so send values as text. */
+export interface AppIdentity {
+  customId?: string;
+  attrs?: Record<string, unknown>;
+}
+
 export interface CheckRequest {
   install_id: string;
   platform: Platform;
